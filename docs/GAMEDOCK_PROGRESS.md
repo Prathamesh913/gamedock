@@ -26,6 +26,20 @@ Omarchy bar → GameDock icon → GameDock panel → click game → game launche
 ~/.config/omarchy/plugins/io.github.prathamesh913.gamedock/
 ```
 
+## Repository
+
+- GameDock now has its own Git repository (this standalone plugin is version
+  controlled independently of Omarchy).
+- Repository root:
+  ```
+  ~/.config/omarchy/plugins/io.github.prathamesh913.gamedock/
+  ```
+- Runtime state stays outside the repository:
+  `~/.local/state/omarchy/gamedock/cache.json` and
+  `~/.local/state/omarchy/settings/gamedock.json` are never committed.
+- Git should be used for checkpoints before major development steps (e.g.
+  before each accepted step), so work can be reviewed and reverted cleanly.
+
 ## Architecture
 
 Stack (fixed, do not change):
