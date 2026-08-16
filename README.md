@@ -8,7 +8,7 @@ An Omarchy Quattro shell plugin (Quickshell/QML + a Python 3 stdlib scanner).
 
 ## Status
 
-**Step 4D — launcher filtering & lightweight sorting.** GameDock reads installed games and recent-played
+**Step 4E — stability & scale hardening.** GameDock reads installed games and recent-played
 metadata from Steam, Heroic, RetroArch playlists, and RPCS3. Favorites persist
 outside the plugin directory, and supported games launch directly through
 their owning application. The panel follows Omarchy visual and interaction
@@ -21,7 +21,9 @@ anything unavailable), and keyboard-first search (`/` or click to activate)
 that filters the loaded library into a single SEARCH RESULTS section with one
 clear "No games found" empty state. Compact launcher chips show All plus
 detected launchers, and Natural/Recent/A–Z/Launcher sorting operates only on
-filtered results in memory.
+filtered results in memory. Artwork cache reuse, bounded lazy downloads,
+latest-wins favorites, normalized search, meaningful cache writes, and
+large-library behavior are hardened without changing the plugin architecture.
 
 See `docs/GAMEDOCK_PROGRESS.md` for the full canonical handoff document.
 

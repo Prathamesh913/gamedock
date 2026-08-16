@@ -430,6 +430,70 @@ launch commands, or artwork implementation.
   byte-identically
 - Runtime cache and favorites remained outside the repository
 
+## Completed Step 4E — stability and scale hardening
+
+Step 4E hardened existing behavior without adding a feature phase or changing
+the cache schema, stable IDs, launchers, or compact list architecture.
+
+### Artwork cache and fetching
+
+- Remote artwork URLs are accepted only when they use `https://`.
+- Artwork checks are per-game and only run for visible/near-visible rows.
+- Existing cache files are checked before any download; valid cached artwork is
+  treated as ready after shell restart and is never redownloaded.
+- The check and download queues are bounded at eight jobs. Opening a large
+  library does not enqueue every remote artwork.
+- Downloads use a temporary `.part` file. `scan.py artwork-commit` validates
+  JPEG/PNG/WebP signatures and atomically promotes only valid content.
+- Failed/invalid artwork remains a glyph fallback and is retryable within a
+  bounded two-attempt policy; local artwork remains highest priority.
+
+### State and presentation hardening
+
+- Whitespace-only search uses the normal library view.
+- Opening GameDock places the shared cursor on the first game row; toolbar
+  chips remain reachable through the shared focusable sequence.
+- The selected sort now applies to Installed Games groups in the normal view;
+  Favorites and Recently Played semantics remain unchanged.
+- Favorite writes are latest-wins and non-blocking: rapid toggles coalesce into
+  a bounded pending write while the current atomic write completes.
+- Scans compare meaningful cache content without `generatedAt`; unchanged
+  scanner output does not rewrite `cache.json`.
+- Hidden normal/search delegates no longer register as active focusables, which
+  reduces duplicate cursor entries and unnecessary large-library work.
+
+### Scale measurements
+
+Controlled synthetic cache tests used 75, 250, 500, and 1000 games. The cache
+was backed up before testing and restored byte-identically afterward.
+
+| Size | Cache reload settle time* | RSS observation | Warnings/errors |
+|---:|---:|---:|---|
+| 75 | ~3.18 s | +4 MB | none |
+| 250 | ~3.18 s | +37 MB cumulative | none |
+| 500 | ~3.08 s | +22 MB additional | none |
+| 1000 | ~3.08 s | +21 MB additional | none |
+
+\* Includes the deliberate three-second FileView/shell settling interval, not
+just QML computation. Three equivalent in-memory filter/search/sort passes took
+0.124 ms, 0.320 ms, 0.626 ms, and 1.372 ms at those sizes. Scrolling/cursor
+behavior remained on the existing Flickable/shared-cursor path, and no
+meaningful degradation or virtualization threshold was observed in this
+controlled test. ListView/virtualization is therefore deferred rather than
+introduced speculatively.
+
+### Validation
+
+- `qmllint -I $OMARCHY_PATH/shell Panel.qml BarWidget.qml` → passed
+- `omarchy plugin validate` → passed
+- Clean shell restart → no new GameDock errors/warnings; only the existing
+  first-party portal warning appeared
+- Cache rewrite test: unchanged meaningful scanner output preserved file hash,
+  size, mtime, and existing `generatedAt`
+- Artwork tests: HTTPS accepted, non-HTTPS rejected, valid image promoted,
+  invalid image rejected and not promoted
+- Real cache and favorites restored byte-identically after all synthetic tests
+
 ## Current game/launcher detection behavior
 
 Detected launchers (all installed on the validation machine):
@@ -553,17 +617,21 @@ Only pre-existing first-party warnings appear in logs (e.g. network panel
 
 - **Steam is empty until logged in.** Steam shows a library-empty state and a
   "Log in to Steam to see your library." note.
-- **Artwork is best-effort.** Heroic remote artwork is fetched on open via
-  curl and cached; until a successful download (or if it fails) the row shows
-  the launcher glyph. RetroArch has no reliable artwork source, so its rows
-  always use the glyph. Steam grid artwork only appears once Steam is logged
-  in with grid files present.
+- **Artwork is best-effort.** Heroic remote artwork is fetched lazily via curl
+  for visible/near-visible rows and cached; until a successful download (or if
+  it fails) the row shows the launcher glyph. RetroArch has no reliable artwork
+  source, so its rows always use the glyph. Steam grid artwork only appears
+  once Steam is logged in with grid files present.
 - **RPCS3 titles are path-derived** (from `games.yml` / disc paths), so titles
   may be file-name derived rather than canonical.
 - **RPCS3 recent timestamps use save/game directory mtimes**, so "recently
   played" ordering for RPCS3 is heuristic.
 - **Playtime tracking is not implemented.**
 - **Controller navigation is not implemented.**
+- **Virtualized list rendering is not currently necessary.** Controlled tests
+  through 1000 synthetic games showed no meaningful threshold requiring a
+  ListView rewrite; the current Repeater/Flickable path remains a future
+  optimization if real-world libraries expose degradation.
 - **Additional gaming integrations are not implemented** (Lutris, Battle.net,
   Moonlight, other V2 integrations).
 - **RetroArch playlist/core metadata limitation:** the current playlist maps
@@ -633,14 +701,16 @@ which pushed LAUNCHERS below the fold, was resolved in Step 4A.
 
 ## Exact recommended next step
 
-**Step 5 (proposed): further integrations or controller support.** Step 4D
-completed the compact browsing controls. Candidate next steps (only if
+**Step 5 (proposed): further integrations or controller support.** Step 4E
+completed stability and scale hardening. Candidate next steps (only if
 accepted by the user):
 
 1. Controller navigation — deferred.
 2. Additional gaming integrations (Lutris, Battle.net, Moonlight) — requires a
    scanner/parser change.
 3. Playtime tracking — deferred.
+4. ListView/virtualization only if a future real-world performance test
+   demonstrates a meaningful threshold.
 
 Do not add features outside the accepted scope. Only change what the specific
 accepted step requires.

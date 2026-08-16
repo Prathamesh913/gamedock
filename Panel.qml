@@ -40,8 +40,11 @@ Panel {
   // artRevision signals GameRows to re-read their cached remote image after a
   // curl download completes.
   property var artworkState: ({})
-  property var artworkQueue: []
+  property var artworkAttempts: ({})
+  property var artworkCheckQueue: []
+  property var artworkDownloadQueue: []
   property int artRevision: 0
+  readonly property int artworkQueueLimit: 8
 
   // Search is a pure presentation/filtering layer over the already-loaded
   // model. Empty query shows the normal library view; any non-empty query
@@ -57,6 +60,11 @@ Panel {
   property string launcherFilter: ""
   property string sortMode: "natural"
   property var filteredRows: []
+  readonly property bool searchActive: root.searchQuery.trim() !== ""
+  readonly property bool normalViewActive: !root.searchActive && root.launcherFilter === ""
+  readonly property bool filteredViewActive: !root.normalViewActive
+
+  property string favoritesPendingPayload: ""
 
   readonly property var launcherFilterOptions: {
     root.dataRevision
@@ -80,16 +88,19 @@ Panel {
     if (searchField.text !== root.searchQuery) searchField.text = root.searchQuery
     root.updateFilteredRows()
     root.focusIndex = -1
+    Qt.callLater(root.refreshVisibleArtwork)
   }
 
   onLauncherFilterChanged: {
     root.updateFilteredRows()
     root.focusIndex = -1
+    Qt.callLater(root.refreshVisibleArtwork)
   }
 
   onSortModeChanged: {
     root.updateFilteredRows()
     root.focusIndex = -1
+    Qt.callLater(root.refreshVisibleArtwork)
   }
 
   readonly property var defaultLaunchers: [
@@ -111,7 +122,7 @@ Panel {
     startTimers()
     loadCache()
     refresh()
-    ensurePanelArtwork()
+    Qt.callLater(root.refreshVisibleArtwork)
     root.searchQuery = ""
     root.launcherFilter = ""
     keyCatcher.forceActiveFocus()
@@ -124,7 +135,7 @@ Panel {
     startTimers()
     loadCache()
     refresh()
-    ensurePanelArtwork()
+    Qt.callLater(root.refreshVisibleArtwork)
     root.searchQuery = ""
     root.launcherFilter = ""
     keyCatcher.forceActiveFocus()
@@ -188,8 +199,18 @@ Panel {
   }
 
   function persistFavorites() {
-    favoritesSaveProcess.command = ["python3", root.scanPath, "favorites-set", Model.saveFavorites()]
-    if (!favoritesSaveProcess.running) favoritesSaveProcess.running = true
+    var payload = Model.saveFavorites()
+    if (favoritesSaveProcess.running) {
+      favoritesPendingPayload = payload
+      return
+    }
+    root.startFavoritesSave(payload)
+  }
+
+  function startFavoritesSave(payload) {
+    favoritesSaveProcess.currentPayload = payload
+    favoritesSaveProcess.command = ["python3", root.scanPath, "favorites-set", payload]
+    favoritesSaveProcess.running = true
   }
 
   function toggleFavorite(game) {
@@ -250,7 +271,14 @@ Panel {
   }
 
   function focusInitial() {
-    if (focusIndex < 0 || focusIndex >= focusables.length) focusIndex = 0
+    var firstGame = -1
+    for (var i = 0; i < focusables.length; i++) {
+      if (focusables[i] && focusables[i].game) {
+        firstGame = i
+        break
+      }
+    }
+    focusIndex = firstGame >= 0 ? firstGame : 0
     focusAt(focusIndex)
   }
 
@@ -294,12 +322,8 @@ Panel {
     return launcher && launcher.icon ? launcher.icon : ""
   }
 
-  // Artwork source resolution: local artwork always wins; a cached remote
-  // download is shown only once its download has completed ("ready"), so the
-  // Image is never pointed at a not-yet-downloaded file (which would log
-  // "Cannot open" warnings). Otherwise the row falls back to the launcher
-  // glyph. Never emits a remote URL directly to the Image — that would let a
-  // broken/unavailable URL render Qt's broken-image state.
+  // Artwork source resolution: local artwork always wins. A remote cache is
+  // shown only after its per-game check or validated download says ready.
   function artworkSource(game) {
     if (!game || !game.artwork) return ""
     var a = game.artwork
@@ -308,58 +332,88 @@ Panel {
     return ""
   }
 
-  function ensureArtwork(game) {
-    if (!game || !game.artwork || !root.opened) return false
+  function artworkNearViewport(item) {
+    if (!item || !root.opened || !panelFlick.visible) return false
+    for (var ancestor = item; ancestor && ancestor !== panelFlick; ancestor = ancestor.parent) {
+      if (!ancestor.visible) return false
+    }
+    var position = item.mapToItem(panelFlick.contentItem, 0, 0)
+    var margin = panelFlick.height
+    return position.y + item.height >= panelFlick.contentY - margin
+      && position.y <= panelFlick.contentY + panelFlick.height + margin
+  }
+
+  function refreshVisibleArtwork() {
+    if (!root.opened) return
+    for (var i = 0; i < focusables.length; i++) {
+      var item = focusables[i]
+      if (item && item.game && root.artworkNearViewport(item)) root.ensureArtwork(item.game, item)
+    }
+  }
+
+  function ensureArtwork(game, item) {
+    if (!game || !game.artwork || !root.opened || !root.artworkNearViewport(item)) return false
     var a = game.artwork
     var url = a.url
     var cachePath = a.cachePath
     if (!url || !cachePath) return false
     var state = root.artworkState[url]
-    if (state === "queued" || state === "inflight" || state === "failed" || state === "ready") return false
-    root.artworkState[url] = "queued"
-    root.artworkQueue.push({ url: url, path: cachePath })
-    root.pumpArtworkQueue()
+    var attempts = Number(root.artworkAttempts[url] || 0)
+    if (state === "checking" || state === "ready" || state === "queued" || state === "inflight") return false
+    if (state === "failed" && attempts >= 2) return false
+    root.artworkState[url] = "checking"
+    if (root.artworkCheckQueue.length < root.artworkQueueLimit)
+      root.artworkCheckQueue.push({ url: url, path: cachePath, game: game })
+    else
+      root.artworkState[url] = ""
+    root.pumpArtworkChecks()
     return true
   }
 
-  function ensurePanelArtwork() {
-    var games = Model.allGames(root.scanDoc)
-    for (var i = 0; i < games.length; i++) root.ensureArtwork(games[i])
-    var recent = root.scanDoc && Array.isArray(root.scanDoc.recent) ? root.scanDoc.recent : []
-    for (var j = 0; j < recent.length; j++) root.ensureArtwork(recent[j])
+  function pumpArtworkChecks() {
+    if (artworkCheckProcess.running || root.artworkCheckQueue.length === 0) return
+    var job = root.artworkCheckQueue.shift()
+    artworkCheckProcess.currentJob = job
+    artworkCheckProcess.command = ["test", "-s", job.path]
+    artworkCheckProcess.running = true
   }
 
-  function pumpArtworkQueue() {
-    if (artworkFetchProcess.running) return
-    if (root.artworkQueue.length === 0) return
-    var job = root.artworkQueue.shift()
+  function queueArtworkDownload(job) {
+    var attempts = Number(root.artworkAttempts[job.url] || 0)
+    if (attempts >= 2 || root.artworkDownloadQueue.length >= root.artworkQueueLimit) {
+      root.artworkState[job.url] = "failed"
+      return
+    }
+    root.artworkAttempts[job.url] = attempts + 1
+    root.artworkState[job.url] = "queued"
+    root.artworkDownloadQueue.push(job)
+    root.pumpArtworkDownloads()
+  }
+
+  function pumpArtworkDownloads() {
+    if (artworkFetchProcess.running || artworkCommitProcess.running
+        || root.artworkDownloadQueue.length === 0) return
+    var job = root.artworkDownloadQueue.shift()
+    artworkFetchProcess.currentJob = job
+    artworkFetchProcess.command = ["curl", "-fsS", "--create-dirs", "--max-time", "8",
+      "-o", job.tempPath, job.url]
     root.artworkState[job.url] = "inflight"
-    artworkFetchProcess.currentUrl = job.url
-    artworkFetchProcess.command = ["curl", "-fsS", "--create-dirs", "--max-time", "8", "-o", job.path, job.url]
     artworkFetchProcess.running = true
   }
 
-  // The filtered view pipeline: all installed games → launcher filter →
-  // search filter → sort → display. Purely in memory over the loaded model;
-  // game objects are referenced (never duplicated) and the stable sort keeps
-  // equal keys in their existing order.
-  function updateFilteredRows() {
-    var q = String(root.searchQuery || "").trim().toLowerCase()
-    var filter = String(root.launcherFilter || "")
-    var games = Model.allGames(root.scanDoc)
-    var out = []
-    for (var i = 0; i < games.length; i++) {
-      var g = games[i]
-      if (!g) continue
-      if (filter !== "" && String(g.launcher) !== filter) continue
-      if (q) {
-        var title = String(g.title || "").toLowerCase()
-        var launcher = String(g.launcher || "").toLowerCase()
-        var launcherName = root.launcherName(g.launcher).toLowerCase()
-        if (title.indexOf(q) === -1 && launcher.indexOf(q) === -1 && launcherName.indexOf(q) === -1) continue
-      }
-      out.push(g)
-    }
+  function invalidateArtwork(game) {
+    if (!game || !game.artwork || !game.artwork.url) return
+    var a = game.artwork
+    root.artworkState[a.url] = "failed"
+    root.queueArtworkDownload({
+      url: a.url,
+      path: a.cachePath,
+      tempPath: a.cachePath + ".part"
+    })
+  }
+
+  function sortGames(values) {
+    var out = Array.isArray(values) ? values.slice() : []
     if (root.sortMode === "az") {
       out.sort(function(a, b) {
         return String(a.title || "").toLowerCase().localeCompare(String(b.title || "").toLowerCase())
@@ -385,7 +439,31 @@ Panel {
         return bt - at
       })
     }
-    root.filteredRows = out
+    return out
+  }
+
+  // The filtered view pipeline: all installed games → launcher filter →
+  // search filter → sort → display. Purely in memory over the loaded model;
+  // game objects are referenced (never duplicated) and the stable sort keeps
+  // equal keys in their existing order.
+  function updateFilteredRows() {
+    var q = String(root.searchQuery || "").trim().toLowerCase()
+    var filter = String(root.launcherFilter || "")
+    var games = Model.allGames(root.scanDoc)
+    var out = []
+    for (var i = 0; i < games.length; i++) {
+      var g = games[i]
+      if (!g) continue
+      if (filter !== "" && String(g.launcher) !== filter) continue
+      if (q) {
+        var title = String(g.title || "").toLowerCase()
+        var launcher = String(g.launcher || "").toLowerCase()
+        var launcherName = root.launcherName(g.launcher).toLowerCase()
+        if (title.indexOf(q) === -1 && launcher.indexOf(q) === -1 && launcherName.indexOf(q) === -1) continue
+      }
+      out.push(g)
+    }
+    root.filteredRows = root.sortGames(out)
   }
 
   function setLauncherFilter(value) {
@@ -407,7 +485,7 @@ Panel {
   }
 
   function filteredEmptyText() {
-    var searching = root.searchQuery !== ""
+    var searching = root.searchActive
     var filtering = root.launcherFilter !== ""
     if (searching)
       return "No games found\nTry another search" + (filtering ? " or launcher." : ".")
@@ -460,7 +538,7 @@ Panel {
 
   function gamesForLauncher(id) {
     root.dataRevision
-    return Model.gamesByLauncher(root.scanDoc, id)
+    return root.sortGames(Model.gamesByLauncher(root.scanDoc, id))
   }
 
   function emptyTextFor(launcherId) {
@@ -522,21 +600,74 @@ Panel {
   Process {
     id: favoritesSaveProcess
     command: ["python3", root.scanPath, "favorites-set", "{}"]
+    property string currentPayload: ""
+    onExited: {
+      if (root.favoritesPendingPayload !== ""
+          && root.favoritesPendingPayload !== currentPayload) {
+        var payload = root.favoritesPendingPayload
+        root.favoritesPendingPayload = ""
+        root.startFavoritesSave(payload)
+      } else {
+        root.favoritesPendingPayload = ""
+      }
+    }
+  }
+
+  Process {
+    id: artworkCheckProcess
+    property var currentJob: null
+    onExited: {
+      var job = artworkCheckProcess.currentJob
+      if (!job) return
+      if (exitCode === 0) {
+        root.artworkState[job.url] = "ready"
+        root.artRevision++
+      } else {
+        root.queueArtworkDownload({
+          url: job.url,
+          path: job.path,
+          tempPath: job.path + ".part"
+        })
+      }
+      root.pumpArtworkChecks()
+    }
   }
 
   // Best-effort, non-blocking remote artwork fetch (Heroic art_square only).
-  // One download at a time via a queue; failures silently fall back to the
-  // launcher glyph and are not retried in this session. On exit the revision
-  // bump makes remote GameRows re-read their cache file.
+  // Curl writes a temporary file; scan.py validates its image signature and
+  // atomically promotes it before the row is marked ready.
   Process {
     id: artworkFetchProcess
-    property string currentUrl: ""
-    onExited: function(exitCode, exitStatus) {
-      var url = artworkFetchProcess.currentUrl
-      if (exitCode === 0) root.artworkState[url] = "ready"
-      else root.artworkState[url] = "failed"
-      root.artRevision++
-      root.pumpArtworkQueue()
+    property var currentJob: null
+    onExited: {
+      var job = artworkFetchProcess.currentJob
+      if (!job) return
+      if (exitCode === 0) {
+        artworkCommitProcess.currentJob = job
+        artworkCommitProcess.command = ["python3", root.scanPath, "artwork-commit",
+          job.tempPath, job.path]
+        artworkCommitProcess.running = true
+      } else {
+        root.artworkState[job.url] = "failed"
+        Quickshell.execDetached(["rm", "-f", job.tempPath])
+        root.pumpArtworkDownloads()
+      }
+    }
+  }
+
+  Process {
+    id: artworkCommitProcess
+    property var currentJob: null
+    onExited: {
+      var job = artworkCommitProcess.currentJob
+      if (!job) return
+      if (exitCode === 0) {
+        root.artworkState[job.url] = "ready"
+        root.artRevision++
+      } else {
+        root.artworkState[job.url] = "failed"
+      }
+      root.pumpArtworkDownloads()
     }
   }
 
@@ -585,6 +716,8 @@ Panel {
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
+        onContentYChanged: Qt.callLater(root.refreshVisibleArtwork)
+        onHeightChanged: Qt.callLater(root.refreshVisibleArtwork)
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
           Column {
@@ -774,7 +907,7 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.space(6)
-            visible: root.searchQuery === "" && root.launcherFilter === ""
+            visible: root.normalViewActive
 
             PanelSeparator {
               foreground: root.bar ? root.bar.foreground : Color.foreground
@@ -791,7 +924,7 @@ Panel {
               }
 
               Repeater {
-                model: root.favoriteRows
+                model: root.normalViewActive ? root.favoriteRows : []
 
                 GameRow {
                   required property var modelData
@@ -830,7 +963,7 @@ Panel {
               }
 
               Repeater {
-                model: root.recentRows
+                model: root.normalViewActive ? root.recentRows : []
 
                 GameRow {
                   required property var modelData
@@ -915,7 +1048,7 @@ Panel {
               }
 
               Repeater {
-                model: root.launcherRows
+                model: root.normalViewActive ? root.launcherRows : []
 
                 LauncherRow {
                   required property var modelData
@@ -935,7 +1068,7 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.space(6)
-            visible: root.searchQuery !== "" || root.launcherFilter !== ""
+            visible: root.filteredViewActive
 
             PanelSeparator {
               foreground: root.bar ? root.bar.foreground : Color.foreground
@@ -946,12 +1079,12 @@ Panel {
               spacing: Style.space(3)
 
               PanelSectionHeader {
-                text: root.searchQuery !== "" ? "SEARCH RESULTS" : "INSTALLED GAMES"
+                text: root.searchActive ? "SEARCH RESULTS" : "INSTALLED GAMES"
                 bottomPadding: Style.space(3)
               }
 
               Repeater {
-                model: root.filteredRows
+                model: root.filteredViewActive ? root.filteredRows : []
 
                 GameRow {
                   required property var modelData
@@ -1056,7 +1189,9 @@ Panel {
           source: root.artworkSource(gameRow.game)
           visible: status === Image.Ready
           onStatusChanged: {
-            if (status === Image.Error && root.opened) root.ensureArtwork(gameRow.game)
+            if (status === Image.Error && root.opened && gameRow.game && gameRow.game.artwork) {
+              if (gameRow.game.artwork.url) root.invalidateArtwork(gameRow.game)
+            }
           }
         }
 
@@ -1211,7 +1346,8 @@ Panel {
     property int focusBase: 2000
     readonly property var rows: {
       root.dataRevision
-      return root.gamesForLauncher(gameGroup.launcherId)
+      root.sortMode
+      return root.normalViewActive ? root.gamesForLauncher(gameGroup.launcherId) : []
     }
 
     spacing: Style.space(3)

@@ -138,11 +138,28 @@ def artwork_object(local_path=None, url=None):
     obj = {}
     if local_path:
         obj["localPath"] = local_path
-    if url:
+    if url and str(url).startswith("https://"):
+        url = str(url)
         obj["url"] = url
         name = hashlib.md5(url.encode("utf-8")).hexdigest() + ".jpg"
         obj["cachePath"] = os.path.join(ART_DIR, name)
     return obj if obj else None
+
+
+def valid_artwork_file(path):
+    """Accept common image signatures without adding an image dependency."""
+    try:
+        if os.path.getsize(path) <= 16:
+            return False
+        with open(path, "rb") as f:
+            header = f.read(16)
+        return (
+            header.startswith(b"\xff\xd8\xff")
+            or header.startswith(b"\x89PNG\r\n\x1a\n")
+            or (header[:4] == b"RIFF" and header[8:12] == b"WEBP")
+        )
+    except OSError:
+        return False
 
 
 def epoch_seconds(text):
@@ -818,8 +835,39 @@ def cmd_scan():
     doc = scan()
     text = json.dumps(doc, indent=2)
     os.makedirs(ART_DIR, exist_ok=True)
+    existing, _ = load_json(CACHE_PATH)
+    current_meaningful = {k: v for k, v in doc.items() if k != "generatedAt"}
+    existing_meaningful = (
+        {k: v for k, v in existing.items() if k != "generatedAt"}
+        if isinstance(existing, dict) else None
+    )
+    if existing_meaningful == current_meaningful:
+        print(json.dumps(existing, indent=2))
+        return
     atomic_write(CACHE_PATH, text)
     print(text)
+
+
+def cmd_artwork_commit():
+    if len(sys.argv) != 4:
+        print("gamedock: artwork-commit requires temp and final paths", file=sys.stderr)
+        sys.exit(2)
+    temp_path, final_path = sys.argv[2], sys.argv[3]
+    if not valid_artwork_file(temp_path):
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        sys.exit(1)
+    try:
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
+        os.replace(temp_path, final_path)
+    except OSError:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        sys.exit(1)
 
 
 def cmd_favorites_set():
@@ -843,8 +891,10 @@ def main():
         cmd_scan()
     elif mode == "favorites-set":
         cmd_favorites_set()
+    elif mode == "artwork-commit":
+        cmd_artwork_commit()
     else:
-        print(f"gamedock: unknown mode '{mode}' (expected scan or favorites-set)", file=sys.stderr)
+        print(f"gamedock: unknown mode '{mode}' (expected scan, favorites-set, or artwork-commit)", file=sys.stderr)
         sys.exit(2)
 
 
