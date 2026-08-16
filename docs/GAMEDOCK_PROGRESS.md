@@ -493,6 +493,8 @@ introduced speculatively.
 - Artwork tests: HTTPS accepted, non-HTTPS rejected, valid image promoted,
   invalid image rejected and not promoted
 - Real cache and favorites restored byte-identically after all synthetic tests
+- `manifest.json` remains at version `0.1.0`; no repository release-versioning
+  convention exists yet, so formal version management is deferred.
 
 ## Current game/launcher detection behavior
 

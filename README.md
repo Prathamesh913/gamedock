@@ -13,17 +13,20 @@ metadata from Steam, Heroic, RetroArch playlists, and RPCS3. Favorites persist
 outside the plugin directory, and supported games launch directly through
 their owning application. The panel follows Omarchy visual and interaction
 patterns: shared cursor hover, keyboard navigation (Escape/Tab/Enter/arrows),
-popout coordination, per-launcher grouping, compact game artwork tiles (local
-Heroic icons, RPCS3 `ICON0.PNG`, Steam grid, plus best-effort remote Heroic
-`art_square` fetched on open via curl and cached under
-`~/.local/state/omarchy/gamedock/art/`, with a launcher-glyph fallback for
-anything unavailable), and keyboard-first search (`/` or click to activate)
-that filters the loaded library into a single SEARCH RESULTS section with one
-clear "No games found" empty state. Compact launcher chips show All plus
-detected launchers, and Natural/Recent/A–Z/Launcher sorting operates only on
-filtered results in memory. Artwork cache reuse, bounded lazy downloads,
-latest-wins favorites, normalized search, meaningful cache writes, and
-large-library behavior are hardened without changing the plugin architecture.
+popout coordination, per-launcher grouping, compact game artwork tiles, and
+keyboard-first search (`/` or click to activate). Local Heroic icons, RPCS3
+`ICON0.PNG`, and Steam grid artwork are used when available. Heroic remote
+artwork is fetched lazily only for visible/near-visible games, cached under
+`~/.local/state/omarchy/gamedock/art/`, and reused across shell restarts.
+Remote URLs must use HTTPS; invalid downloads are rejected. If remote artwork
+cannot be fetched, GameDock continues working with the launcher-glyph fallback.
+`curl` is used for optional remote artwork downloads. If curl is unavailable or
+a remote download fails, GameDock itself continues working normally.
+Compact launcher chips show All plus detected launchers, and
+Natural/Recent/A–Z/Launcher sorting operates only on filtered results in
+memory. Artwork cache reuse, bounded lazy downloads, latest-wins favorites,
+normalized search, meaningful cache writes, and large-library behavior are
+hardened without changing the plugin architecture.
 
 See `docs/GAMEDOCK_PROGRESS.md` for the full canonical handoff document.
 
@@ -64,11 +67,14 @@ Move it with `omarchy bar move io.github.prathamesh913.gamedock --section right`
 | Path | Owner | Purpose |
 |---|---|---|
 | `~/.local/state/omarchy/gamedock/cache.json` | `scan.py scan` | canonical game/launcher cache |
+| `~/.local/state/omarchy/gamedock/art/` | `Panel.qml` / optional `curl` | validated cached remote artwork |
 | `~/.local/state/omarchy/settings/gamedock.json` | `scan.py favorites-set` | `{ "favorites": [...] }` |
 
 ## Dependencies
 
-None beyond what Omarchy ships: Quickshell (shell), Python 3 stdlib (scanner).
+Required: Quickshell (shell) and Python 3 stdlib (scanner). `curl` is optional
+and used only for best-effort remote artwork; GameDock falls back to launcher
+glyphs when curl is unavailable.
 
 ## Remove
 
