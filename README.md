@@ -8,7 +8,7 @@ An Omarchy Quattro shell plugin (Quickshell/QML + a Python 3 stdlib scanner).
 
 ## Status
 
-**Step 4C — game search.** GameDock reads installed games and recent-played
+**Step 4D — launcher filtering & lightweight sorting.** GameDock reads installed games and recent-played
 metadata from Steam, Heroic, RetroArch playlists, and RPCS3. Favorites persist
 outside the plugin directory, and supported games launch directly through
 their owning application. The panel follows Omarchy visual and interaction
@@ -19,7 +19,9 @@ Heroic icons, RPCS3 `ICON0.PNG`, Steam grid, plus best-effort remote Heroic
 `~/.local/state/omarchy/gamedock/art/`, with a launcher-glyph fallback for
 anything unavailable), and keyboard-first search (`/` or click to activate)
 that filters the loaded library into a single SEARCH RESULTS section with one
-clear "No games found" empty state.
+clear "No games found" empty state. Compact launcher chips show All plus
+detected launchers, and Natural/Recent/A–Z/Launcher sorting operates only on
+filtered results in memory.
 
 See `docs/GAMEDOCK_PROGRESS.md` for the full canonical handoff document.
 
@@ -38,14 +40,17 @@ Move it with `omarchy bar move io.github.prathamesh913.gamedock --section right`
 - Escape closes the panel; Tab switches to the next bar panel
 - `/` or click the search field to search your library (Escape clears the
   query first, then closes)
+- Launcher and sort chips are mouse- or keyboard-selectable; changing them
+  never rescans or changes runtime state
 
 ## How it works
 
 - `BarWidget.qml` — bar pill (gamepad glyph) that loads and forwards the
   panel lifecycle, so GameDock participates in bar popout coordination.
-- `Panel.qml` — `KeyboardPanel` with a search field and four sections:
-  Favorites, Recently Played, Launchers, Installed Games (a non-empty search
-  replaces them with a single SEARCH RESULTS section).
+- `Panel.qml` — `KeyboardPanel` with search, compact launcher/sort controls,
+  and four normal sections: Favorites, Recently Played, Launchers, Installed
+  Games. An active search or launcher filter replaces them with one filtered
+  results section.
 - `Model.js` — scan-data views, favorites state, and detached launch command
   builders.
 - `scan.py` — Python 3 stdlib backend. `scan` parses launcher metadata and

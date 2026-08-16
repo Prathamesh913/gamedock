@@ -49,11 +49,46 @@ Panel {
   // case-insensitive substring over game title and launcher id/name,
   // recomputed only when the query or the cache document changes.
   property string searchQuery: ""
-  property var searchRows: []
+
+  // Launcher filter ("", i.e. All) + lightweight sort, both presentation-only.
+  // "natural" preserves cache order by default; "recent" uses real timestamps
+  // and "az"/"launcher" reorder the filtered rows. Filtering/search/sorting run in
+  // memory over the loaded model; no scan, filesystem, or network work.
+  property string launcherFilter: ""
+  property string sortMode: "natural"
+  property var filteredRows: []
+
+  readonly property var launcherFilterOptions: {
+    root.dataRevision
+    var out = [{ value: "", label: "All" }]
+    var rows = root.launcherRows
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i] && rows[i].installed === true)
+        out.push({ value: String(rows[i].id), label: root.shortLauncherName(rows[i].id) })
+    }
+    return out
+  }
+
+  readonly property var sortOptions: [
+    { value: "natural", label: "Natural" },
+    { value: "recent", label: "Recent" },
+    { value: "az", label: "A–Z" },
+    { value: "launcher", label: "Launcher" }
+  ]
 
   onSearchQueryChanged: {
     if (searchField.text !== root.searchQuery) searchField.text = root.searchQuery
-    root.updateSearchRows()
+    root.updateFilteredRows()
+    root.focusIndex = -1
+  }
+
+  onLauncherFilterChanged: {
+    root.updateFilteredRows()
+    root.focusIndex = -1
+  }
+
+  onSortModeChanged: {
+    root.updateFilteredRows()
     root.focusIndex = -1
   }
 
@@ -78,6 +113,7 @@ Panel {
     refresh()
     ensurePanelArtwork()
     root.searchQuery = ""
+    root.launcherFilter = ""
     keyCatcher.forceActiveFocus()
     Qt.callLater(root.focusInitial)
   }
@@ -90,6 +126,7 @@ Panel {
     refresh()
     ensurePanelArtwork()
     root.searchQuery = ""
+    root.launcherFilter = ""
     keyCatcher.forceActiveFocus()
     Qt.callLater(root.focusInitial)
   }
@@ -135,7 +172,7 @@ Panel {
     Model.setLaunchers(launchers)
     dataRevision++
     refreshViews()
-    root.updateSearchRows()
+    root.updateFilteredRows()
   }
 
   function setFavorites(values) {
@@ -302,28 +339,81 @@ Panel {
     artworkFetchProcess.running = true
   }
 
-  // Search is keyboard-first and lives on the shared cursor model, not Qt
-  // focus. The search field is a real TextField while it holds focus (the key
-  // catcher is blocked); once the cursor moves into the results the key
-  // catcher drives navigation and printable keys refine the query.
-  function updateSearchRows() {
+  // The filtered view pipeline: all installed games → launcher filter →
+  // search filter → sort → display. Purely in memory over the loaded model;
+  // game objects are referenced (never duplicated) and the stable sort keeps
+  // equal keys in their existing order.
+  function updateFilteredRows() {
     var q = String(root.searchQuery || "").trim().toLowerCase()
-    if (!q) {
-      root.searchRows = []
-      return
-    }
+    var filter = String(root.launcherFilter || "")
     var games = Model.allGames(root.scanDoc)
     var out = []
     for (var i = 0; i < games.length; i++) {
       var g = games[i]
       if (!g) continue
-      var title = String(g.title || "").toLowerCase()
-      var launcher = String(g.launcher || "").toLowerCase()
-      var launcherName = root.launcherName(g.launcher).toLowerCase()
-      if (title.indexOf(q) !== -1 || launcher.indexOf(q) !== -1 || launcherName.indexOf(q) !== -1)
-        out.push(g)
+      if (filter !== "" && String(g.launcher) !== filter) continue
+      if (q) {
+        var title = String(g.title || "").toLowerCase()
+        var launcher = String(g.launcher || "").toLowerCase()
+        var launcherName = root.launcherName(g.launcher).toLowerCase()
+        if (title.indexOf(q) === -1 && launcher.indexOf(q) === -1 && launcherName.indexOf(q) === -1) continue
+      }
+      out.push(g)
     }
-    root.searchRows = out
+    if (root.sortMode === "az") {
+      out.sort(function(a, b) {
+        return String(a.title || "").toLowerCase().localeCompare(String(b.title || "").toLowerCase())
+      })
+    } else if (root.sortMode === "launcher") {
+      var order = {}
+      var rows = root.launcherRows
+      for (var j = 0; j < rows.length; j++) order[String(rows[j].id)] = j
+      out.sort(function(a, b) {
+        var ai = Object.prototype.hasOwnProperty.call(order, String(a.launcher)) ? order[String(a.launcher)] : rows.length
+        var bi = Object.prototype.hasOwnProperty.call(order, String(b.launcher)) ? order[String(b.launcher)] : rows.length
+        return ai - bi
+      })
+    } else if (root.sortMode === "recent") {
+      // "recent": real timestamps first (newest first), then games without
+      // timestamps in their stable existing order.
+      out.sort(function(a, b) {
+        var at = a.lastPlayed !== null && a.lastPlayed !== undefined ? Number(a.lastPlayed) : -1
+        var bt = b.lastPlayed !== null && b.lastPlayed !== undefined ? Number(b.lastPlayed) : -1
+        if (at < 0 && bt < 0) return 0
+        if (at < 0) return 1
+        if (bt < 0) return -1
+        return bt - at
+      })
+    }
+    root.filteredRows = out
+  }
+
+  function setLauncherFilter(value) {
+    root.launcherFilter = String(value || "")
+  }
+
+  function setSortMode(value) {
+    root.sortMode = String(value || "natural")
+  }
+
+  // Compact display label for a launcher chip/empty state. Falls back to the
+  // model's full launcher name for any launcher outside the known set.
+  function shortLauncherName(id) {
+    if (id === "steam") return "Steam"
+    if (id === "heroic") return "Heroic"
+    if (id === "retroarch") return "RetroArch"
+    if (id === "rpcs3") return "RPCS3"
+    return root.launcherName(id)
+  }
+
+  function filteredEmptyText() {
+    var searching = root.searchQuery !== ""
+    var filtering = root.launcherFilter !== ""
+    if (searching)
+      return "No games found\nTry another search" + (filtering ? " or launcher." : ".")
+    if (filtering)
+      return "No games found for " + root.shortLauncherName(root.launcherFilter) + "."
+    return ""
   }
 
   function focusSearch() {
@@ -586,12 +676,105 @@ Panel {
             }
           }
 
-          // Normal library view (empty search query) — the unchanged Step 1-4
-          // layout: Favorites, Recently Played, Installed Games, Launchers.
+          // Launcher filter — compact chip row (All + installed launchers).
+          // Each chip is an ordinary focusable in the shared cursor, so arrow
+          // navigation, Enter/Space activation, and mouse hover all work like
+          // any other row/star; no Qt focus is given to the chips.
+          Item {
+            width: parent.width
+            implicitHeight: launcherFilterChips.implicitHeight
+
+            Row {
+              id: launcherFilterChips
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.leftMargin: Style.space(6)
+              anchors.rightMargin: Style.space(6)
+              spacing: Style.space(4)
+
+              Repeater {
+                model: root.launcherFilterOptions
+
+                Button {
+                  id: filterChip
+                  required property var modelData
+                  required property int index
+                  text: modelData ? modelData.label : "All"
+                  selected: root.launcherFilter === (modelData ? modelData.value : "")
+                  hasCursor: root.focusables[root.focusIndex] === filterChip
+                  bordered: true
+                  foreground: root.bar ? root.bar.foreground : Color.foreground
+                  accent: Color.accent
+                  fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+                  fontSize: Style.font.caption
+                  horizontalPadding: Style.space(6)
+                  verticalPadding: Style.space(2)
+                  property int focusOrder: -2000 + index
+                  onHovered: function(h) { if (h) root.setHoverCursor(filterChip) }
+                  onClicked: {
+                    root.setHoverCursor(filterChip)
+                    root.setLauncherFilter(modelData ? modelData.value : "")
+                  }
+                  function activate() { root.setLauncherFilter(modelData ? modelData.value : "") }
+                  Component.onCompleted: root.registerFocusable(filterChip)
+                  Component.onDestruction: root.unregisterFocusable(filterChip)
+                }
+              }
+            }
+          }
+
+          // Lightweight sort — compact chip row (Recently Played / A–Z /
+          // Launcher). Same focusable pattern as the filter chips.
+          Item {
+            width: parent.width
+            implicitHeight: sortChips.implicitHeight
+
+            Row {
+              id: sortChips
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.leftMargin: Style.space(6)
+              anchors.rightMargin: Style.space(6)
+              spacing: Style.space(4)
+
+              Repeater {
+                model: root.sortOptions
+
+                Button {
+                  id: sortChip
+                  required property var modelData
+                  required property int index
+                  text: modelData ? modelData.label : "Natural"
+                  selected: root.sortMode === (modelData ? modelData.value : "natural")
+                  hasCursor: root.focusables[root.focusIndex] === sortChip
+                  bordered: true
+                  foreground: root.bar ? root.bar.foreground : Color.foreground
+                  accent: Color.accent
+                  fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+                  fontSize: Style.font.caption
+                  horizontalPadding: Style.space(6)
+                  verticalPadding: Style.space(2)
+                  property int focusOrder: -1000 + index
+                  onHovered: function(h) { if (h) root.setHoverCursor(sortChip) }
+                  onClicked: {
+                    root.setHoverCursor(sortChip)
+                    root.setSortMode(modelData ? modelData.value : "natural")
+                  }
+                  function activate() { root.setSortMode(modelData ? modelData.value : "natural") }
+                  Component.onCompleted: root.registerFocusable(sortChip)
+                  Component.onDestruction: root.unregisterFocusable(sortChip)
+                }
+              }
+            }
+          }
+
+          // Normal library view (empty search query, All launcher filter) —
+          // the unchanged Step 1-4 layout: Favorites, Recently Played,
+          // Installed Games, Launchers.
           Column {
             width: parent.width
             spacing: Style.space(6)
-            visible: root.searchQuery === ""
+            visible: root.searchQuery === "" && root.launcherFilter === ""
 
             PanelSeparator {
               foreground: root.bar ? root.bar.foreground : Color.foreground
@@ -745,13 +928,14 @@ Panel {
             }
           }
 
-          // Search view (non-empty query): one flat SEARCH RESULTS section
-          // reusing GameRow (artwork + favorites included). No repeated empty
-          // sections — a single "No games found" state when nothing matches.
+          // Filtered view (non-empty query OR active launcher filter): one
+          // flat section reusing GameRow (artwork + favorites included) with
+          // the selected sort applied. No repeated empty sections — a single
+          // context-aware empty state when nothing matches.
           Column {
             width: parent.width
             spacing: Style.space(6)
-            visible: root.searchQuery !== ""
+            visible: root.searchQuery !== "" || root.launcherFilter !== ""
 
             PanelSeparator {
               foreground: root.bar ? root.bar.foreground : Color.foreground
@@ -762,12 +946,12 @@ Panel {
               spacing: Style.space(3)
 
               PanelSectionHeader {
-                text: "SEARCH RESULTS"
+                text: root.searchQuery !== "" ? "SEARCH RESULTS" : "INSTALLED GAMES"
                 bottomPadding: Style.space(3)
               }
 
               Repeater {
-                model: root.searchRows
+                model: root.filteredRows
 
                 GameRow {
                   required property var modelData
@@ -780,8 +964,8 @@ Panel {
               }
 
               Text {
-                visible: root.searchRows.length === 0
-                text: "No games found\nTry another search."
+                visible: root.filteredRows.length === 0
+                text: root.filteredEmptyText()
                 color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.35)
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.caption
