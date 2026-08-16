@@ -43,6 +43,20 @@ Panel {
   property var artworkQueue: []
   property int artRevision: 0
 
+  // Search is a pure presentation/filtering layer over the already-loaded
+  // model. Empty query shows the normal library view; any non-empty query
+  // shows a single SEARCH RESULTS section instead. Matching is a
+  // case-insensitive substring over game title and launcher id/name,
+  // recomputed only when the query or the cache document changes.
+  property string searchQuery: ""
+  property var searchRows: []
+
+  onSearchQueryChanged: {
+    if (searchField.text !== root.searchQuery) searchField.text = root.searchQuery
+    root.updateSearchRows()
+    root.focusIndex = -1
+  }
+
   readonly property var defaultLaunchers: [
     { id: "steam", name: "Steam", icon: "", installed: false, executable: "", note: "" },
     { id: "heroic", name: "Heroic Games Launcher", icon: "󱓟", installed: false, executable: "", note: "" },
@@ -63,6 +77,8 @@ Panel {
     loadCache()
     refresh()
     ensurePanelArtwork()
+    root.searchQuery = ""
+    keyCatcher.forceActiveFocus()
     Qt.callLater(root.focusInitial)
   }
 
@@ -73,6 +89,8 @@ Panel {
     loadCache()
     refresh()
     ensurePanelArtwork()
+    root.searchQuery = ""
+    keyCatcher.forceActiveFocus()
     Qt.callLater(root.focusInitial)
   }
 
@@ -117,6 +135,7 @@ Panel {
     Model.setLaunchers(launchers)
     dataRevision++
     refreshViews()
+    root.updateSearchRows()
   }
 
   function setFavorites(values) {
@@ -239,14 +258,16 @@ Panel {
   }
 
   // Artwork source resolution: local artwork always wins; a cached remote
-  // download is shown once curl has written it; otherwise the row falls back
-  // to the launcher glyph. Never emits a remote URL directly to the Image —
-  // that would let a broken/unavailable URL render Qt's broken-image state.
+  // download is shown only once its download has completed ("ready"), so the
+  // Image is never pointed at a not-yet-downloaded file (which would log
+  // "Cannot open" warnings). Otherwise the row falls back to the launcher
+  // glyph. Never emits a remote URL directly to the Image — that would let a
+  // broken/unavailable URL render Qt's broken-image state.
   function artworkSource(game) {
     if (!game || !game.artwork) return ""
     var a = game.artwork
     if (a.localPath) return "file://" + a.localPath
-    if (a.cachePath) return "file://" + a.cachePath
+    if (a.cachePath && root.artworkState[a.url] === "ready") return "file://" + a.cachePath
     return ""
   }
 
@@ -279,6 +300,57 @@ Panel {
     artworkFetchProcess.currentUrl = job.url
     artworkFetchProcess.command = ["curl", "-fsS", "--create-dirs", "--max-time", "8", "-o", job.path, job.url]
     artworkFetchProcess.running = true
+  }
+
+  // Search is keyboard-first and lives on the shared cursor model, not Qt
+  // focus. The search field is a real TextField while it holds focus (the key
+  // catcher is blocked); once the cursor moves into the results the key
+  // catcher drives navigation and printable keys refine the query.
+  function updateSearchRows() {
+    var q = String(root.searchQuery || "").trim().toLowerCase()
+    if (!q) {
+      root.searchRows = []
+      return
+    }
+    var games = Model.allGames(root.scanDoc)
+    var out = []
+    for (var i = 0; i < games.length; i++) {
+      var g = games[i]
+      if (!g) continue
+      var title = String(g.title || "").toLowerCase()
+      var launcher = String(g.launcher || "").toLowerCase()
+      var launcherName = root.launcherName(g.launcher).toLowerCase()
+      if (title.indexOf(q) !== -1 || launcher.indexOf(q) !== -1 || launcherName.indexOf(q) !== -1)
+        out.push(g)
+    }
+    root.searchRows = out
+  }
+
+  function focusSearch() {
+    searchField.forceActiveFocus()
+  }
+
+  function focusFirstSearchResult() {
+    keyCatcher.forceActiveFocus()
+    Qt.callLater(function() { root.focusAt(0) })
+  }
+
+  // Escape from the key catcher (search field not focused): clear a non-empty
+  // query first, close only when the query is already empty.
+  function handleEscape() {
+    if (root.searchQuery !== "") root.searchQuery = ""
+    else root.close()
+  }
+
+  // Printable key from the key catcher (search field not focused). "/"
+  // activates the search field; with a non-empty query other characters
+  // refine it, matching the first-party menu/dropdown filter pattern.
+  function handleTextKey(t) {
+    if (t === "/") {
+      root.focusSearch()
+      return
+    }
+    if (root.searchQuery !== "") root.searchQuery = root.searchQuery + t
   }
 
   function launcherInstalled(id) {
@@ -399,13 +471,19 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // While the search field holds Qt focus, forward keys to it instead of
+      // driving the panel cursor (the documented inline-editor pattern).
+      blocked: searchField.activeFocus
       onMoveRequested: function(dx, dy) {
         root.moveFocus(dy !== 0 ? dy : dx)
       }
       onActivateRequested: root.activateFocused()
-      onCloseRequested: root.close()
+      onCloseRequested: root.handleEscape()
       onTabRequested: function(direction) {
         root.switchPanel(direction)
+      }
+      onTextKey: function(text) {
+        root.handleTextKey(text)
       }
 
       Flickable {
@@ -468,149 +546,249 @@ Panel {
             foreground: root.bar ? root.bar.foreground : Color.foreground
           }
 
+          Item {
+            width: parent.width
+            implicitHeight: searchField.implicitHeight
+
+            TextField {
+              id: searchField
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.leftMargin: Style.space(6)
+              anchors.rightMargin: Style.space(6)
+              verticalPadding: Style.space(4)
+              placeholderText: "󰍉  Search games..."
+              foreground: root.bar ? root.bar.foreground : Color.foreground
+              accent: Color.accent
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+
+              onTextChanged: {
+                if (root.searchQuery !== text) root.searchQuery = text
+              }
+
+              // The field only owns keys while it holds Qt focus (the key
+              // catcher is blocked). Tab/Shift+Tab keep switching bar panels,
+              // Down/Enter hand off to the shared-cursor results, and Escape
+              // clears the query before closing — exactly the panel rule.
+              Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Escape) {
+                  if (root.searchQuery !== "") root.searchQuery = ""
+                  else root.close()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                  root.switchPanel((event.modifiers & Qt.ShiftModifier) || event.key === Qt.Key_Backtab ? -1 : 1)
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Down || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                  root.focusFirstSearchResult()
+                  event.accepted = true
+                }
+              }
+            }
+          }
+
+          // Normal library view (empty search query) — the unchanged Step 1-4
+          // layout: Favorites, Recently Played, Installed Games, Launchers.
           Column {
             width: parent.width
-            spacing: Style.space(3)
+            spacing: Style.space(6)
+            visible: root.searchQuery === ""
 
-            PanelSectionHeader {
-              text: "FAVORITES"
-              topPadding: 0
-              bottomPadding: Style.space(3)
+            PanelSeparator {
+              foreground: root.bar ? root.bar.foreground : Color.foreground
             }
 
-            Repeater {
-              model: root.favoriteRows
+            Column {
+              width: parent.width
+              spacing: Style.space(3)
 
-              GameRow {
-                required property var modelData
-                required property int index
+              PanelSectionHeader {
+                text: "FAVORITES"
+                topPadding: 0
+                bottomPadding: Style.space(3)
+              }
+
+              Repeater {
+                model: root.favoriteRows
+
+                GameRow {
+                  required property var modelData
+                  required property int index
+                  width: parent.width
+                  game: modelData
+                  starred: true
+                  focusOrder: index * 2
+                }
+              }
+
+              Text {
+                visible: root.favoriteRows.length === 0
+                text: "No favorites yet · Star a game to keep it here."
+                color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.35)
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+                leftPadding: Style.space(6)
+                bottomPadding: Style.space(2)
+                elide: Text.ElideRight
                 width: parent.width
-                game: modelData
-                starred: true
-                focusOrder: index * 2
               }
             }
 
-            Text {
-              visible: root.favoriteRows.length === 0
-              text: "No favorites yet · Star a game to keep it here."
-              color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.35)
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-              leftPadding: Style.space(6)
-              bottomPadding: Style.space(2)
-              elide: Text.ElideRight
+            PanelSeparator {
+              foreground: root.bar ? root.bar.foreground : Color.foreground
+            }
+
+            Column {
               width: parent.width
-            }
-          }
+              spacing: Style.space(3)
 
-          PanelSeparator {
-            foreground: root.bar ? root.bar.foreground : Color.foreground
-          }
+              PanelSectionHeader {
+                text: "RECENTLY PLAYED"
+                bottomPadding: Style.space(3)
+              }
 
-          Column {
-            width: parent.width
-            spacing: Style.space(3)
+              Repeater {
+                model: root.recentRows
 
-            PanelSectionHeader {
-              text: "RECENTLY PLAYED"
-              bottomPadding: Style.space(3)
-            }
+                GameRow {
+                  required property var modelData
+                  required property int index
+                  width: parent.width
+                  game: modelData
+                  starred: root.favoriteIds.indexOf(String(modelData.id)) >= 0
+                  focusOrder: 1000 + index * 2
+                }
+              }
 
-            Repeater {
-              model: root.recentRows
-
-              GameRow {
-                required property var modelData
-                required property int index
-                width: parent.width
-                game: modelData
-                starred: root.favoriteIds.indexOf(String(modelData.id)) >= 0
-                focusOrder: 1000 + index * 2
+              Text {
+                visible: root.recentRows.length === 0
+                text: "No recently played games."
+                color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.35)
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+                leftPadding: Style.space(6)
+                bottomPadding: Style.space(2)
               }
             }
 
-            Text {
-              visible: root.recentRows.length === 0
-              text: "No recently played games."
-              color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.35)
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-              leftPadding: Style.space(6)
-              bottomPadding: Style.space(2)
-            }
-          }
-
-          PanelSeparator {
-            foreground: root.bar ? root.bar.foreground : Color.foreground
-          }
-
-          Column {
-            width: parent.width
-            spacing: Style.space(3)
-
-            PanelSectionHeader {
-              text: "INSTALLED GAMES"
-              bottomPadding: Style.space(3)
+            PanelSeparator {
+              foreground: root.bar ? root.bar.foreground : Color.foreground
             }
 
-            LauncherGames {
+            Column {
               width: parent.width
-              launcherId: "steam"
-              launcherName: "Steam"
-              focusBase: 2000
-            }
-            LauncherGames {
-              width: parent.width
-              launcherId: "heroic"
-              launcherName: "Heroic Games Launcher"
-              focusBase: 2100
-            }
-            LauncherGames {
-              width: parent.width
-              launcherId: "retroarch"
-              launcherName: "RetroArch"
-              focusBase: 2200
-            }
-            LauncherGames {
-              width: parent.width
-              launcherId: "rpcs3"
-              launcherName: "RPCS3"
-              focusBase: 2300
-            }
+              spacing: Style.space(3)
 
-            Text {
-              visible: root.installedGameCount === 0
-              text: "No games found."
-              color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.35)
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-              leftPadding: Style.space(6)
-            }
-          }
+              PanelSectionHeader {
+                text: "INSTALLED GAMES"
+                bottomPadding: Style.space(3)
+              }
 
-          PanelSeparator {
-            foreground: root.bar ? root.bar.foreground : Color.foreground
-          }
-
-          Column {
-            width: parent.width
-            spacing: Style.space(3)
-
-            PanelSectionHeader {
-              text: "LAUNCHERS"
-              bottomPadding: Style.space(3)
-            }
-
-            Repeater {
-              model: root.launcherRows
-
-              LauncherRow {
-                required property var modelData
-                required property int index
+              LauncherGames {
                 width: parent.width
-                launcher: modelData
-                focusOrder: 3000 + index
+                launcherId: "steam"
+                launcherName: "Steam"
+                focusBase: 2000
+              }
+              LauncherGames {
+                width: parent.width
+                launcherId: "heroic"
+                launcherName: "Heroic Games Launcher"
+                focusBase: 2100
+              }
+              LauncherGames {
+                width: parent.width
+                launcherId: "retroarch"
+                launcherName: "RetroArch"
+                focusBase: 2200
+              }
+              LauncherGames {
+                width: parent.width
+                launcherId: "rpcs3"
+                launcherName: "RPCS3"
+                focusBase: 2300
+              }
+
+              Text {
+                visible: root.installedGameCount === 0
+                text: "No games found."
+                color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.35)
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+                leftPadding: Style.space(6)
+              }
+            }
+
+            PanelSeparator {
+              foreground: root.bar ? root.bar.foreground : Color.foreground
+            }
+
+            Column {
+              width: parent.width
+              spacing: Style.space(3)
+
+              PanelSectionHeader {
+                text: "LAUNCHERS"
+                bottomPadding: Style.space(3)
+              }
+
+              Repeater {
+                model: root.launcherRows
+
+                LauncherRow {
+                  required property var modelData
+                  required property int index
+                  width: parent.width
+                  launcher: modelData
+                  focusOrder: 3000 + index
+                }
+              }
+            }
+          }
+
+          // Search view (non-empty query): one flat SEARCH RESULTS section
+          // reusing GameRow (artwork + favorites included). No repeated empty
+          // sections — a single "No games found" state when nothing matches.
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+            visible: root.searchQuery !== ""
+
+            PanelSeparator {
+              foreground: root.bar ? root.bar.foreground : Color.foreground
+            }
+
+            Column {
+              width: parent.width
+              spacing: Style.space(3)
+
+              PanelSectionHeader {
+                text: "SEARCH RESULTS"
+                bottomPadding: Style.space(3)
+              }
+
+              Repeater {
+                model: root.searchRows
+
+                GameRow {
+                  required property var modelData
+                  required property int index
+                  width: parent.width
+                  game: modelData
+                  starred: root.favoriteIds.indexOf(String(modelData.id)) >= 0
+                  focusOrder: 4000 + index * 2
+                }
+              }
+
+              Text {
+                visible: root.searchRows.length === 0
+                text: "No games found\nTry another search."
+                color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.35)
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+                leftPadding: Style.space(6)
+                bottomPadding: Style.space(2)
+                lineHeight: 1.4
+                width: parent.width
               }
             }
           }

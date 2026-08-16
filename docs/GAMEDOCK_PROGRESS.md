@@ -65,7 +65,7 @@ Constraints (hard rules):
 |---|---|
 | `manifest.json` | Plugin schema: id `io.github.prathamesh913.gamedock`, kind `bar-widget`, entry `BarWidget.qml`, `refreshIntervalSec` setting (default 300). |
 | `BarWidget.qml` | Bar pill (gamepad glyph). Loads `Panel.qml` via a `Loader` and forwards the panel lifecycle (`open`/`close`/`toggle`/`openFromHotkey`/`popoutSwitchClosing`/`closeForPopoutSwitch`) so GameDock participates in bar popout coordination. Middle/right click refreshes the scan. |
-| `Panel.qml` | The `KeyboardPanel`. Owns cached-data presentation, launch/favorite actions, focus/keyboard navigation, panel lifecycle, and artwork display. Contains `GameRow`, `LauncherRow`, and `LauncherGames` components. `GameRow` shows a compact artwork tile with a launcher-glyph fallback; remote-only artwork is fetched on open via a detached `curl` process. |
+| `Panel.qml` | The `KeyboardPanel`. Owns cached-data presentation, launch/favorite actions, focus/keyboard navigation, panel lifecycle, search, and artwork display. Contains `GameRow`, `LauncherRow`, and `LauncherGames` components. `GameRow` shows a compact artwork tile with a launcher-glyph fallback; remote-only artwork is fetched on open via a detached `curl` process. A search field filters the loaded model (keyboard-first, shared cursor), showing a single SEARCH RESULTS section while a query is active. |
 | `Model.js` | Scan-data views (`allGames`, `recentGames`, `favoriteGames`, `gamesByLauncher`, `relativeTime`), favorites state, and detached launch command builders (`launchGame`, `launchLauncher`). |
 | `scan.py` | Python 3 stdlib backend. `scan` parses launcher metadata and atomically writes `cache.json`; `favorites-set` persists favorites. Per-launcher error isolation. Emits optional per-game `artwork` metadata (local paths + Heroic `art_square` URL + deterministic `cachePath`). |
 | `icons/` | Plugin icon assets. |
@@ -305,6 +305,68 @@ Real-data results:
 - Runtime state confirmed outside the repository (`git status` clean of
   cache/art/pycache)
 
+## Completed Step 4C — game search
+
+Keyboard-first search over the already-loaded model. Pure presentation layer:
+no scanner, cache, favorites, launch, keyboard-architecture, or artwork changes.
+No launcher filter in 4C (see "Recommended next step").
+
+### UI
+
+- A compact search `TextField` (qs.Ui, the first-party search component)
+  sits under the header, above FAVORITES, always visible.
+- Empty query → the normal Favorites / Recently Played / Installed Games /
+  Launchers layout, unchanged.
+- Non-empty query → one flat **SEARCH RESULTS** section (reuses `GameRow` with
+  artwork + favorite stars); Favorites/Recent/Installed/Launchers are hidden.
+- No results → a single empty state: "No games found / Try another search."
+- Query resets to empty each time the panel opens (matches the first-party
+  menu panel clearing its filter on close).
+
+### Matching
+
+- Case-insensitive substring match against game title and launcher id/name
+  (so "hog" → Hogwarts Legacy, "hero"/"heroic" → Heroic games).
+- Runs in memory on the loaded model only; no scans, filesystem access, or
+  network on keystroke. O(n) per query over installed games; instantaneous
+  even for hundreds/thousands of games.
+
+### Keyboard interaction (integrated, not replacing, the shared cursor)
+
+- Search is **not** auto-focused on open; `/` or clicking the field activates
+  it (the field takes Qt focus and `PanelKeyCatcher.blocked` forwards keys to
+  it — the documented inline-editor pattern).
+- Field focused: native typing; **Tab/Shift+Tab → switchPanel** (intercepted,
+  so panel switching still works); **Down/Enter → cursor to first result**;
+  **Escape → clear query (non-empty) / close (empty)**.
+- Field not focused with a non-empty query: printable keys refine the query
+  (`PanelKeyCatcher.textKey`), arrows move the shared cursor through results,
+  Enter/Space launch/toggle, and Escape clears the query before closing.
+- Rows keep `activeFocusOnTab` off; Qt focus stays on the key catcher. No
+  native focus-traversal regressions.
+
+### Performance
+
+- Filtering recomputes only when the query or cache document changes.
+- SEARCH RESULTS reuses the existing GameRow artwork (local / cached remote /
+  glyph fallback) and the 700px cap + Flickable scrolling.
+
+### Validation
+
+- `qmllint -I $OMARCHY_PATH/shell Panel.qml BarWidget.qml` → passed (exit 0)
+- `omarchy plugin validate` → passed (exit 0)
+- Clean shell restart → no GameDock errors or warnings (only the pre-existing
+  first-party portal message)
+- Real-data search verified: "hog" → Hogwarts Legacy; "silent" → Silent Hill 2;
+  "grand" → Grand Theft Auto V; "heroic"/"hero" → Hogwarts Legacy; unknown
+  string → no matches; empty → normal view
+- Synthetic 78-game library test (25 Heroic + 26 RetroArch + 27 RPCS3 + real
+  games): filtering correct across the set, panel stayed clean (no "Cannot
+  open" artwork warnings after the ready-gated remote source), real cache and
+  favorites restored byte-identical afterward
+- Regression: launch, favorites, keyboard, popout, artwork fallback all use
+  the unchanged Step 1–4B code paths
+
 ## Current game/launcher detection behavior
 
 Detected launchers (all installed on the validation machine):
@@ -362,9 +424,15 @@ load and change. The scan `Process` re-reads the cache after a successful scan.
 
 ## Keyboard behavior
 
-- **Escape** — closes the panel.
+- **Escape** — clears a non-empty search query first; when the query is
+  already empty (or search isn't active) it closes the panel.
 - **Tab** — switches to the next bar panel (`bar.switchPanelFrom`).
 - **Shift+Tab** — switches to the previous bar panel.
+- **`/`** — activates the search field (also by clicking it). Not auto-focused
+  on open.
+- **Search field focused** — typing edits the query; Tab/Shift+Tab still
+  switch panels; Down/Enter hand the cursor to the first result; Escape clears
+  the query then closes.
 - **Up/Down** (and `k`/`j`) — move the cursor through focusables.
 - **Left/Right** (and `h`/`l`) — move the cursor through focusables (rows and
   their star buttons are ordered by `focusOrder`).
@@ -372,12 +440,12 @@ load and change. The scan `Process` re-reads the cache after a successful scan.
   toggles a favorite star.
 - **Space** — same as Enter.
 - Focus order: Favorites rows/stars → Recently Played rows/stars → Installed
-  rows/stars → Launchers rows. `focusables` is sorted by each item's
-  `focusOrder`.
+  rows/stars → Launchers rows; SEARCH RESULTS rows/stars (4000+) when a query
+  is active. `focusables` is sorted by each item's `focusOrder`.
 - Hovering a row/star moves the shared cursor (`setHoverCursor`), so mouse and
   keyboard share one highlight.
-- Qt focus stays on the `PanelKeyCatcher` (the panel's `focusTarget`); rows
-  are not Qt tab-focusable.
+- Qt focus stays on the `PanelKeyCatcher` (the panel's `focusTarget`) or the
+  search field while it is active; rows are not Qt tab-focusable.
 
 ## Popout behavior
 
@@ -396,7 +464,7 @@ load and change. The scan `Process` re-reads the cache after a successful scan.
 |---|---|
 | `qmllint -I $OMARCHY_PATH/shell Panel.qml` | passed (exit 0) |
 | `qmllint ... BarWidget.qml` | passed (exit 0) |
-| `qmllint -I $OMARCHY_PATH/shell Panel.qml BarWidget.qml` | passed (exit 0, Step 4B) |
+| `qmllint -I $OMARCHY_PATH/shell Panel.qml BarWidget.qml` | passed (exit 0, Step 4B/4C) |
 | `omarchy plugin validate ~/.config/omarchy/plugins/io.github.prathamesh913.gamedock` | passed (exit 0) |
 | `omarchy restart shell` | clean; no GameDock errors in journal or runtime log |
 | Launch regression (Enter on Hogwarts Legacy) | launched via Heroic URI with correct args; process cleaned up |
@@ -405,6 +473,8 @@ load and change. The scan `Process` re-reads the cache after a successful scan.
 | Popout switch (GameDock ↔ bluetooth) | working both directions |
 | Artwork: Heroic icon / RPCS3 ICON0.PNG / RetroArch glyph fallback | verified in scanner output |
 | Artwork remote fetch (curl to art cache) | verified; valid JPEG written under `gamedock/art/` |
+| Search: "hog"/"silent"/"grand"/"heroic"/"hOG"/unknown/empty | all match correctly (Step 4C) |
+| Synthetic 78-game library | filtering responsive; no artwork warnings; cache restored byte-identical |
 
 Only pre-existing first-party warnings appear in logs (e.g. network panel
 `PanelSectionHeader` binding-loop, bluetooth same) — not GameDock.
@@ -423,7 +493,10 @@ Only pre-existing first-party warnings appear in logs (e.g. network panel
 - **RPCS3 recent timestamps use save/game directory mtimes**, so "recently
   played" ordering for RPCS3 is heuristic.
 - **Playtime tracking is not implemented.**
-- **Search is not implemented.**
+- **Launcher filter is not implemented.** Search covers titles and launcher
+  names; a dedicated All/Steam/Heroic/RetroArch/RPCS3 filter row was
+  deliberately left for a later step to keep 4C focused on search and
+  keyboard integration.
 - **Controller navigation is not implemented.**
 - **Additional gaming integrations are not implemented** (Lutris, Battle.net,
   Moonlight, other V2 integrations).
@@ -452,15 +525,20 @@ Only pre-existing first-party warnings appear in logs (e.g. network panel
 Panel sections, in order:
 
 1. Header — gamepad glyph + "GAME DOCK" + "Gaming dashboard" subtitle.
-2. **FAVORITES** — favorited games; star toggles; compact empty state
+2. **Search field** — compact `TextField` ("󰍉 Search games..."); `/` or a
+   click activates it. Filters the loaded model live; while a query is active
+   the normal sections are replaced by SEARCH RESULTS.
+3. **FAVORITES** — favorited games; star toggles; compact empty state
    ("No favorites yet · Star a game to keep it here.").
-3. **RECENTLY PLAYED** — merged across launchers, newest first, relative time
+4. **RECENTLY PLAYED** — merged across launchers, newest first, relative time
    shown when reliable.
-4. **INSTALLED GAMES** — grouped per launcher (Steam, Heroic, RetroArch,
+5. **INSTALLED GAMES** — grouped per launcher (Steam, Heroic, RetroArch,
    RPCS3); each group shows the launcher name, its games, and a launcher-
    specific empty note when the launcher has no games.
-5. **LAUNCHERS** — Steam, Heroic, RetroArch, RPCS3 with availability state
+6. **LAUNCHERS** — Steam, Heroic, RetroArch, RPCS3 with availability state
    (✓ / "Unavailable").
+7. **SEARCH RESULTS** (only when a query is active) — matching games in one
+   flat section; single empty state "No games found / Try another search."
 
 Each `GameRow` shows: artwork tile (launcher glyph fallback), title,
 launcher/platform + relative time, favorite star, hover/cursor highlight, and
@@ -470,9 +548,10 @@ launch affordance.
 
 Panel dimensions: `contentWidth = fittedContentWidth(Style.space(340))`,
 `contentHeight = fittedContentHeight(implicitHeight, Style.space(700))`.
-With real data (1 favorite + 3 recent + 3 installed + 4 launchers) the panel
-sizes to ~660 logical px and all four sections fit without scrolling. Larger
-libraries grow the panel up to the 700 cap, then scroll via the `Flickable`.
+With real data (1 favorite + 3 recent + 3 installed + 4 launchers) plus the
+search field the panel reaches ~700 logical px; very slightly larger content
+scrolls via the `Flickable`. Larger libraries grow the panel up to the 700 cap
+and scroll via the `Flickable`.
 
 ## Height cap
 
@@ -486,19 +565,20 @@ which pushed LAUNCHERS below the fold, was resolved in Step 4A.
 
 ## Exact recommended next step
 
-**Step 4C (proposed): further polish beyond artwork.** Step 4B added compact
-artwork tiles with remote fallback. Candidate next steps (only if accepted by
-the user):
+**Step 4D (proposed): further polish beyond search.** Step 4C added keyboard-
+first search with a single SEARCH RESULTS section. Candidate next steps (only
+if accepted by the user):
 
-1. Additional gaming integrations (Lutris, Battle.net, Moonlight) — requires a
+1. Launcher filter (All/Steam/Heroic/RetroArch/RPCS3, combined with search) —
+   deliberately deferred from 4C to keep it focused; the cleanest follow-up.
+2. Additional gaming integrations (Lutris, Battle.net, Moonlight) — requires a
    scanner/parser change.
-2. Search, filters, or controller navigation — all deferred.
-3. Playtime tracking — deferred.
+3. Controller navigation or playtime tracking — deferred.
 
-Re-run the Step 3/4A/4B validation list (keyboard, popout, launch, favorites,
-artwork, visual) after any accepted step. Do not add features outside the
-accepted scope.
+Re-run the Step 3/4A/4B/4C validation list (keyboard, popout, launch,
+favorites, artwork, search, visual) after any accepted step. Do not add
+features outside the accepted scope.
 
-Only change what the specific accepted step requires. Do not add search,
-controller navigation, playtime, or new launchers unless a future step
-explicitly asks for them.
+Only change what the specific accepted step requires. Do not add controller
+navigation, playtime, or new launchers unless a future step explicitly asks
+for them.
