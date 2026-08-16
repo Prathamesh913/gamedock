@@ -8,6 +8,18 @@ and launch games directly without opening a launcher UI first.
 
 ![GameDock preview](preview.png)
 
+## Looks at home in Omarchy
+
+GameDock is designed as an Omarchy-native plugin and follows the existing
+Omarchy visual and theming system. The same compact panel adapts naturally to
+different built-in Omarchy themes:
+
+<div align="center">
+  <img src="docs/images/gamedock-theme-01.png" alt="GameDock in an Omarchy theme" width="32%">
+  <img src="docs/images/gamedock-theme-02.png" alt="GameDock in a second Omarchy theme" width="32%">
+  <img src="docs/images/gamedock-theme-03.png" alt="GameDock in a third Omarchy theme" width="32%">
+</div>
+
 ## Features
 
 - 🎮 Unified game launcher
