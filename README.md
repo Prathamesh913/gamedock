@@ -69,6 +69,27 @@ To move the widget to another bar section:
 omarchy bar move io.github.prathamesh913.gamedock --section right
 ```
 
+## Uninstallation
+
+Use the Omarchy plugin manager rather than deleting the plugin directory:
+
+```bash
+omarchy plugin remove io.github.prathamesh913.gamedock --yes
+```
+
+This disables GameDock, removes the installed plugin, and reloads Omarchy's
+plugin list. Runtime data is preserved:
+
+- `~/.local/state/omarchy/gamedock/cache.json` — scanned game data
+- `~/.local/state/omarchy/gamedock/art/` — cached artwork
+- `~/.local/state/omarchy/settings/gamedock.json` — favorite IDs
+
+To remove that data as well, optionally run:
+
+```bash
+rm -rf ~/.local/state/omarchy/gamedock ~/.local/state/omarchy/settings/gamedock.json
+```
+
 ## Requirements
 
 - Omarchy with Quickshell plugin support
