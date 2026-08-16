@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.prathamesh913.gamedock",
+  "name": "GameDock",
+  "version": "0.1.0",
+  "author": "Prathamesh",
+  "license": "MIT",
+  "description": "Gaming dashboard for the Omarchy bar: launch Steam, Heroic, RetroArch, and RPCS3 games straight from a compact panel.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "GameDock",
+    "description": "Gaming dashboard: launchers, recently played, installed games, and favorites.",
+    "category": "Gaming",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 300
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 60,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 300
+      }
+    ]
+  }
+}
