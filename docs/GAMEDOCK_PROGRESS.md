@@ -65,9 +65,9 @@ Constraints (hard rules):
 |---|---|
 | `manifest.json` | Plugin schema: id `io.github.prathamesh913.gamedock`, kind `bar-widget`, entry `BarWidget.qml`, `refreshIntervalSec` setting (default 300). |
 | `BarWidget.qml` | Bar pill (gamepad glyph). Loads `Panel.qml` via a `Loader` and forwards the panel lifecycle (`open`/`close`/`toggle`/`openFromHotkey`/`popoutSwitchClosing`/`closeForPopoutSwitch`) so GameDock participates in bar popout coordination. Middle/right click refreshes the scan. |
-| `Panel.qml` | The `KeyboardPanel`. Owns cached-data presentation, launch/favorite actions, focus/keyboard navigation, and panel lifecycle. Contains `GameRow`, `LauncherRow`, and `LauncherGames` components. |
+| `Panel.qml` | The `KeyboardPanel`. Owns cached-data presentation, launch/favorite actions, focus/keyboard navigation, panel lifecycle, and artwork display. Contains `GameRow`, `LauncherRow`, and `LauncherGames` components. `GameRow` shows a compact artwork tile with a launcher-glyph fallback; remote-only artwork is fetched on open via a detached `curl` process. |
 | `Model.js` | Scan-data views (`allGames`, `recentGames`, `favoriteGames`, `gamesByLauncher`, `relativeTime`), favorites state, and detached launch command builders (`launchGame`, `launchLauncher`). |
-| `scan.py` | Python 3 stdlib backend. `scan` parses launcher metadata and atomically writes `cache.json`; `favorites-set` persists favorites. Per-launcher error isolation. |
+| `scan.py` | Python 3 stdlib backend. `scan` parses launcher metadata and atomically writes `cache.json`; `favorites-set` persists favorites. Per-launcher error isolation. Emits optional per-game `artwork` metadata (local paths + Heroic `art_square` URL + deterministic `cachePath`). |
 | `icons/` | Plugin icon assets. |
 | `preview.png` | Preview image. |
 | `LICENSE` | MIT. |
@@ -229,6 +229,82 @@ the real data (`errors: []`).
 - Clean shell restart → no GameDock errors in journal/runtime log
 - Favorites persist across restart ✓
 
+## Completed Step 4B — game artwork
+
+Compact 30×30 artwork tiles in `GameRow`, replacing the launcher glyph. The
+panel stays a native list-based design — no grid/card layout.
+
+### Artwork sources
+
+| Launcher | Source | Shape |
+|---|---|---|
+| Heroic | `~/.config/heroic/icons/<app_name>.jpg` (local) and `art_square` from `store_cache/*_library.json` (remote URL) | `localPath` + `url`/`cachePath` |
+| RPCS3 | `dev_hdd0/game/<serial>/ICON0.PNG` or `<serial>_install/ICON0.PNG` | `localPath` |
+| Steam | `userdata/<id>/config/grid/<appid>p.jpg` (grid artwork; none today until logged in with grid files) | `localPath` |
+| RetroArch | none reliable | no artwork object → glyph fallback |
+
+`artwork_object()` in `scan.py` emits `{"localPath", "url", "cachePath"}` only
+when a real source exists. `cachePath` is a deterministic `md5(url)` path under
+`~/.local/state/omarchy/gamedock/art/`. Remote URLs are never invented — only
+existing metadata (`art_square`).
+
+Real-data results:
+
+- Hogwarts Legacy → Heroic icon (local)
+- Grand Theft Auto V → RPCS3 `ICON0.PNG` (local)
+- Silent Hill 2 → launcher glyph fallback (no reliable RetroArch art)
+
+### Local artwork behavior
+
+- Shown immediately from disk (`asynchronous: true`, `cache: false` file URLs).
+- Local artwork always wins over remote; a remote URL is never fetched while a
+  `localPath` exists.
+
+### Remote artwork behavior
+
+- Heroic remote-only artwork is fetched **on panel open** through a detached
+  `curl -fsS --create-dirs --max-time 8 -o <cachePath> <url>` process.
+- One queued download at a time; per-URL state (`queued`/`inflight`/`failed`/
+  `ready`) prevents repeat downloads and failed retries.
+- Never blocks QML, scanning, or launching (Quickshell `Process`, non-blocking).
+- On completion, `artRevision` bumps and remote GameRows re-read their cache
+  file so the image appears without reopening the panel.
+- Failed downloads silently fall back to the launcher glyph and are not
+  retried in the session.
+
+### UI changes
+
+- `GameRow`'s launcher glyph is replaced by a 30×30 rounded tile
+  (`radius: Style.spacing.labelGap`, `Style.normalFillFor` backdrop).
+- The `Image` is visible only once decoded (`status === Image.Ready`), so an
+  invalid/missing/unavailable source can never render Qt's broken-image
+  placeholder; the launcher glyph is the fallback for any non-ready state.
+- Title Column width reserves the new tile: `Style.space(62)` →
+  `Style.space(70)` (30 tile + 8 + 8 + 24 star). Row height math is unchanged;
+  `GameRow` stays compact (~33–36 logical px).
+
+### Performance
+
+- No synchronous downloads; every fetch is async and best-effort.
+- Local artwork renders immediately from disk.
+- Remote artwork downloads once per URL (cached under the art dir); later
+  opens read the cache file.
+- No background daemons, no new dependencies, no network traffic on every
+  open.
+
+### Validation
+
+- `qmllint -I $OMARCHY_PATH/shell Panel.qml BarWidget.qml` → passed (exit 0)
+- `omarchy plugin validate` → passed (exit 0)
+- Clean shell restart → no GameDock errors in journal (only pre-existing
+  first-party messages)
+- Scanner output verified against the real 3-game library (artwork per the
+  table above, `errors: []`)
+- Remote fetch verified: `curl -fsS --create-dirs --max-time 8` wrote a valid
+  1200×1600 JPEG into the art cache dir
+- Runtime state confirmed outside the repository (`git status` clean of
+  cache/art/pycache)
+
 ## Current game/launcher detection behavior
 
 Detected launchers (all installed on the validation machine):
@@ -278,6 +354,7 @@ panel, so no process is blocked on the shell. Launch availability is gated by
 | Path | Owner | Purpose |
 |---|---|---|
 | `~/.local/state/omarchy/gamedock/cache.json` | `scan.py scan` | canonical game/launcher/recent cache |
+| `~/.local/state/omarchy/gamedock/art/` | `Panel.qml` (curl) | downloaded remote artwork cache (md5(url).jpg) |
 | `~/.local/state/omarchy/settings/gamedock.json` | `scan.py favorites-set` | `{ "favorites": [...] }` |
 
 `cache.json` is watched by `FileView` (`watchChanges: true`) and re-applied on
@@ -319,12 +396,15 @@ load and change. The scan `Process` re-reads the cache after a successful scan.
 |---|---|
 | `qmllint -I $OMARCHY_PATH/shell Panel.qml` | passed (exit 0) |
 | `qmllint ... BarWidget.qml` | passed (exit 0) |
+| `qmllint -I $OMARCHY_PATH/shell Panel.qml BarWidget.qml` | passed (exit 0, Step 4B) |
 | `omarchy plugin validate ~/.config/omarchy/plugins/io.github.prathamesh913.gamedock` | passed (exit 0) |
 | `omarchy restart shell` | clean; no GameDock errors in journal or runtime log |
 | Launch regression (Enter on Hogwarts Legacy) | launched via Heroic URI with correct args; process cleaned up |
 | Favorite toggle | immediate UI update; persists across shell restart |
 | Keyboard: Escape / Tab / Shift+Tab / Enter / arrows | all working |
 | Popout switch (GameDock ↔ bluetooth) | working both directions |
+| Artwork: Heroic icon / RPCS3 ICON0.PNG / RetroArch glyph fallback | verified in scanner output |
+| Artwork remote fetch (curl to art cache) | verified; valid JPEG written under `gamedock/art/` |
 
 Only pre-existing first-party warnings appear in logs (e.g. network panel
 `PanelSectionHeader` binding-loop, bluetooth same) — not GameDock.
@@ -333,16 +413,20 @@ Only pre-existing first-party warnings appear in logs (e.g. network panel
 
 - **Steam is empty until logged in.** Steam shows a library-empty state and a
   "Log in to Steam to see your library." note.
+- **Artwork is best-effort.** Heroic remote artwork is fetched on open via
+  curl and cached; until a successful download (or if it fails) the row shows
+  the launcher glyph. RetroArch has no reliable artwork source, so its rows
+  always use the glyph. Steam grid artwork only appears once Steam is logged
+  in with grid files present.
 - **RPCS3 titles are path-derived** (from `games.yml` / disc paths), so titles
   may be file-name derived rather than canonical.
 - **RPCS3 recent timestamps use save/game directory mtimes**, so "recently
   played" ordering for RPCS3 is heuristic.
-- **Cover art is not implemented.**
+- **Playtime tracking is not implemented.**
 - **Search is not implemented.**
 - **Controller navigation is not implemented.**
 - **Additional gaming integrations are not implemented** (Lutris, Battle.net,
   Moonlight, other V2 integrations).
-- **Playtime tracking is not implemented.**
 - **RetroArch playlist/core metadata limitation:** the current playlist maps
   Silent Hill 2 to the PUAE (Amiga) core, which appears to be incorrect
   playlist metadata. GameDock intentionally preserves the playlist's configured
@@ -378,10 +462,11 @@ Panel sections, in order:
 5. **LAUNCHERS** — Steam, Heroic, RetroArch, RPCS3 with availability state
    (✓ / "Unavailable").
 
-Each `GameRow` shows: launcher glyph, title, launcher/platform + relative
-time, favorite star, hover/cursor highlight, and launch affordance (pointer
-cursor + click/keyboard activation). `LauncherRow` shows: launcher glyph,
-name, availability status, hover/cursor highlight, and launch affordance.
+Each `GameRow` shows: artwork tile (launcher glyph fallback), title,
+launcher/platform + relative time, favorite star, hover/cursor highlight, and
+launch affordance (pointer cursor + click/keyboard activation). `LauncherRow`
+shows: launcher glyph, name, availability status, hover/cursor highlight, and
+launch affordance.
 
 Panel dimensions: `contentWidth = fittedContentWidth(Style.space(340))`,
 `contentHeight = fittedContentHeight(implicitHeight, Style.space(700))`.
@@ -401,18 +486,19 @@ which pushed LAUNCHERS below the fold, was resolved in Step 4A.
 
 ## Exact recommended next step
 
-**Step 4B (proposed): further polish beyond panel space.** Step 4A resolved
-the height-cap issue for the current library. Candidate next steps (only if
-accepted by the user):
+**Step 4C (proposed): further polish beyond artwork.** Step 4B added compact
+artwork tiles with remote fallback. Candidate next steps (only if accepted by
+the user):
 
 1. Additional gaming integrations (Lutris, Battle.net, Moonlight) — requires a
-   scanner/parser change (Step 4+ scope, not 4A).
-2. Cover art, search, filters, or controller navigation — all deferred.
+   scanner/parser change.
+2. Search, filters, or controller navigation — all deferred.
+3. Playtime tracking — deferred.
 
-Re-run the Step 3/4A validation list (keyboard, popout, launch, favorites,
-visual) after any accepted step. Do not add features outside the accepted
-scope.
+Re-run the Step 3/4A/4B validation list (keyboard, popout, launch, favorites,
+artwork, visual) after any accepted step. Do not add features outside the
+accepted scope.
 
-Only change what the specific accepted step requires. Do not add cover art,
-search, controller navigation, playtime, or new launchers unless a future step
+Only change what the specific accepted step requires. Do not add search,
+controller navigation, playtime, or new launchers unless a future step
 explicitly asks for them.

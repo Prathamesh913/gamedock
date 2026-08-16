@@ -9,15 +9,25 @@ Modes:
                  canonical JSON document to stdout.
   favorites-set  Persist the panel's favorites state (JSON on argv).
 
-Canonical document shape:
+  Canonical document shape:
 
   {
     "generatedAt": 0,
     "launchers": [{"id", "name", "icon", "executable", "installed", "note"}, ...],
-    "recent": [{"id", "title", "launcher", "lastPlayed", "installed", "launch"}, ...],
+    "recent": [{"id", "title", "launcher", "lastPlayed", "installed", "launch", "artwork"?}, ...],
     "games": [same shape, ...],
     "errors": [{"launcher", "message"}, ...]
   }
+
+  Optional per-game artwork (only when a real local/remote source exists):
+
+  "artwork": {"localPath": "...", "url": "...", "cachePath": "..."}
+
+  - localPath: existing local image (Heroic icons/<app>.jpg, RPCS3 ICON0.PNG,
+    Steam grid <appid>p.jpg)
+  - url: existing remote metadata (Heroic art_square only; never invented)
+  - cachePath: deterministic md5(url) path under the art cache dir where the
+    panel's detached curl download lands
 
 Stable game IDs:
   steam/<appid>
@@ -35,6 +45,7 @@ Design rules:
 
 import glob
 import calendar
+import hashlib
 import json
 import os
 import re
@@ -46,6 +57,7 @@ from datetime import datetime
 
 HOME = os.path.expanduser("~")
 STATE_DIR = os.path.join(HOME, ".local", "state", "omarchy", "gamedock")
+ART_DIR = os.path.join(STATE_DIR, "art")
 SETTINGS_DIR = os.path.join(HOME, ".local", "state", "omarchy", "settings")
 CACHE_PATH = os.path.join(STATE_DIR, "cache.json")
 FAVORITES_PATH = os.path.join(SETTINGS_DIR, "gamedock.json")
@@ -114,6 +126,23 @@ def load_json(path):
 
 def add_error(doc, launcher, message):
     doc["errors"].append({"launcher": launcher, "message": message})
+
+
+def artwork_object(local_path=None, url=None):
+    """Build the optional artwork metadata for a game, or None.
+
+    Only real sources are used: an existing local file and/or an existing
+    remote URL taken from launcher metadata (never invented). The deterministic
+    cachePath is where the panel's detached curl download is stored.
+    """
+    obj = {}
+    if local_path:
+        obj["localPath"] = local_path
+    if url:
+        obj["url"] = url
+        name = hashlib.md5(url.encode("utf-8")).hexdigest() + ".jpg"
+        obj["cachePath"] = os.path.join(ART_DIR, name)
+    return obj if obj else None
 
 
 def epoch_seconds(text):
@@ -290,6 +319,16 @@ def find_all(node, key):
 # ---------------------------------------------------------------------------
 
 
+def _steam_grid_icon(steam_root, appid):
+    """Existing Steam grid artwork (userdata/<id>/config/grid/<appid>p.jpg)."""
+    grid_root = os.path.join(steam_root, "userdata")
+    for sub in glob.glob(os.path.join(grid_root, "*", "config", "grid")):
+        icon = os.path.join(sub, str(appid) + "p.jpg")
+        if os.path.isfile(icon):
+            return icon
+    return None
+
+
 def scan_steam(doc, launcher):
     root = os.path.join(HOME, ".local", "share", "Steam")
     if not os.path.isdir(root):
@@ -363,6 +402,9 @@ def scan_steam(doc, launcher):
     for appid, g in sorted(games_by_appid.items()):
         g["lastPlayed"] = last_played.get(appid)
         g["launch"] = {"appid": appid}
+        art = artwork_object(_steam_grid_icon(root, appid))
+        if art:
+            g["artwork"] = art
         games.append(g)
 
     recent = []
@@ -377,6 +419,7 @@ def scan_steam(doc, launcher):
             "lastPlayed": ts,
             "installed": True,
             "launch": {"appid": appid},
+            "artwork": g.get("artwork"),
         })
 
     doc["games"].extend(games)
@@ -402,6 +445,8 @@ def scan_heroic(doc, launcher):
         ("nile", "store_cache", "nile_library.json"),
     ]
 
+    icons_dir = os.path.join(base, "icons")
+
     entries = {}  # (runner, app_name) -> info
     for runner, folder, fname in library_specs:
         data, err = load_json(os.path.join(base, folder, fname))
@@ -425,6 +470,7 @@ def scan_heroic(doc, launcher):
                 "app_name": app_name,
                 "title": title,
                 "installed": is_installed,
+                "art_square": str(item.get("art_square") or ""),
             }
 
     # recently played / playtime metadata
@@ -455,14 +501,19 @@ def scan_heroic(doc, launcher):
             continue
         gid = "heroic/{}/{}".format(runner, app_name)
         lp = timestamps.get(app_name)
-        games.append({
+        local_icon = os.path.join(icons_dir, app_name + ".jpg")
+        art = artwork_object(local_icon if os.path.isfile(local_icon) else None, e["art_square"])
+        game = {
             "id": gid,
             "title": e["title"],
             "launcher": "heroic",
             "installed": True,
             "lastPlayed": lp,
             "launch": {"appName": app_name, "runner": runner},
-        })
+        }
+        if art:
+            game["artwork"] = art
+        games.append(game)
     doc["games"].extend(games)
 
     recent = []
@@ -471,14 +522,19 @@ def scan_heroic(doc, launcher):
         if e is None:
             continue
         gid = "heroic/{}/{}".format(e["runner"], app_name)
-        recent.append({
+        local_icon = os.path.join(icons_dir, app_name + ".jpg")
+        art = artwork_object(local_icon if os.path.isfile(local_icon) else None, e["art_square"])
+        entry = {
             "id": gid,
             "title": e["title"],
             "launcher": "heroic",
             "lastPlayed": lp,
             "installed": e["installed"],
             "launch": {"appName": app_name, "runner": e["runner"]},
-        })
+        }
+        if art:
+            entry["artwork"] = art
+        recent.append(entry)
     doc["recent"].extend(recent)
 
 
@@ -650,6 +706,13 @@ def scan_rpcs3(doc, launcher):
     savedata_dir = os.path.join(home_id, "savedata")
     game_dir = os.path.join(base, "dev_hdd0", "game")
 
+    def rpcs3_icon(serial):
+        for sub in (os.path.join(game_dir, serial), os.path.join(game_dir, serial + "_install")):
+            icon = os.path.join(sub, "ICON0.PNG")
+            if os.path.isfile(icon):
+                return icon
+        return None
+
     games = []
     for line in raw.splitlines():
         line = line.strip()
@@ -674,14 +737,18 @@ def scan_rpcs3(doc, launcher):
             mt = dir_mtime_max(sub)
             if mt is not None and (lp is None or mt > lp):
                 lp = mt
-        games.append({
+        art = artwork_object(rpcs3_icon(serial))
+        game = {
             "id": "rpcs3/" + serial,
             "title": _rpcs3_title_from_path(path),
             "launcher": "rpcs3",
             "installed": True,
             "lastPlayed": lp,
             "launch": {"path": path},
-        })
+        }
+        if art:
+            game["artwork"] = art
+        games.append(game)
 
     games.sort(key=lambda g: g["title"].lower())
     doc["games"].extend(games)
@@ -689,7 +756,7 @@ def scan_rpcs3(doc, launcher):
     recent = []
     for g in games:
         if g["lastPlayed"] is not None:
-            recent.append({k: g[k] for k in ("id", "title", "launcher", "lastPlayed", "installed", "launch")})
+            recent.append({k: g[k] for k in ("id", "title", "launcher", "lastPlayed", "installed", "launch", "artwork") if k in g})
     recent.sort(key=lambda g: g["lastPlayed"], reverse=True)
     doc["recent"].extend(recent)
 
@@ -750,6 +817,7 @@ def scan():
 def cmd_scan():
     doc = scan()
     text = json.dumps(doc, indent=2)
+    os.makedirs(ART_DIR, exist_ok=True)
     atomic_write(CACHE_PATH, text)
     print(text)
 

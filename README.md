@@ -8,16 +8,16 @@ An Omarchy Quattro shell plugin (Quickshell/QML + a Python 3 stdlib scanner).
 
 ## Status
 
-**Step 4A — panel space & content density.** GameDock reads installed games
-and recent-played metadata from Steam, Heroic, RetroArch playlists, and RPCS3.
-Favorites persist outside the plugin directory, and supported games launch
-directly through their owning application. The panel follows Omarchy visual
-and interaction patterns: shared cursor hover, keyboard navigation
-(Escape/Tab/Enter/arrows), popout coordination, and per-launcher grouping. The
-panel's maximum height was raised to `Style.space(700)` so all four sections
-(Favorites, Recently Played, Installed Games, Launchers) fit the current
-library without scrolling, while the `Flickable` still handles larger
-libraries.
+**Step 4B — game artwork.** GameDock reads installed games and recent-played
+metadata from Steam, Heroic, RetroArch playlists, and RPCS3. Favorites persist
+outside the plugin directory, and supported games launch directly through
+their owning application. The panel follows Omarchy visual and interaction
+patterns: shared cursor hover, keyboard navigation (Escape/Tab/Enter/arrows),
+popout coordination, per-launcher grouping, and compact game artwork tiles
+(local Heroic icons, RPCS3 `ICON0.PNG`, Steam grid, plus best-effort remote
+Heroic `art_square` fetched on open via curl and cached under
+`~/.local/state/omarchy/gamedock/art/`, with a launcher-glyph fallback for
+anything unavailable).
 
 See `docs/GAMEDOCK_PROGRESS.md` for the full canonical handoff document.
 

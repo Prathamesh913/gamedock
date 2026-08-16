@@ -35,6 +35,14 @@ Panel {
   property var focusables: []
   property int focusIndex: -1
 
+  // Remote artwork download state. Keyed by URL: "queued" | "inflight" |
+  // "failed" | "ready". Guards prevent repeat downloads and failed retries.
+  // artRevision signals GameRows to re-read their cached remote image after a
+  // curl download completes.
+  property var artworkState: ({})
+  property var artworkQueue: []
+  property int artRevision: 0
+
   readonly property var defaultLaunchers: [
     { id: "steam", name: "Steam", icon: "", installed: false, executable: "", note: "" },
     { id: "heroic", name: "Heroic Games Launcher", icon: "󱓟", installed: false, executable: "", note: "" },
@@ -54,6 +62,7 @@ Panel {
     startTimers()
     loadCache()
     refresh()
+    ensurePanelArtwork()
     Qt.callLater(root.focusInitial)
   }
 
@@ -63,6 +72,7 @@ Panel {
     startTimers()
     loadCache()
     refresh()
+    ensurePanelArtwork()
     Qt.callLater(root.focusInitial)
   }
 
@@ -228,6 +238,49 @@ Panel {
     return launcher && launcher.icon ? launcher.icon : ""
   }
 
+  // Artwork source resolution: local artwork always wins; a cached remote
+  // download is shown once curl has written it; otherwise the row falls back
+  // to the launcher glyph. Never emits a remote URL directly to the Image —
+  // that would let a broken/unavailable URL render Qt's broken-image state.
+  function artworkSource(game) {
+    if (!game || !game.artwork) return ""
+    var a = game.artwork
+    if (a.localPath) return "file://" + a.localPath
+    if (a.cachePath) return "file://" + a.cachePath
+    return ""
+  }
+
+  function ensureArtwork(game) {
+    if (!game || !game.artwork || !root.opened) return false
+    var a = game.artwork
+    var url = a.url
+    var cachePath = a.cachePath
+    if (!url || !cachePath) return false
+    var state = root.artworkState[url]
+    if (state === "queued" || state === "inflight" || state === "failed" || state === "ready") return false
+    root.artworkState[url] = "queued"
+    root.artworkQueue.push({ url: url, path: cachePath })
+    root.pumpArtworkQueue()
+    return true
+  }
+
+  function ensurePanelArtwork() {
+    var games = Model.allGames(root.scanDoc)
+    for (var i = 0; i < games.length; i++) root.ensureArtwork(games[i])
+    var recent = root.scanDoc && Array.isArray(root.scanDoc.recent) ? root.scanDoc.recent : []
+    for (var j = 0; j < recent.length; j++) root.ensureArtwork(recent[j])
+  }
+
+  function pumpArtworkQueue() {
+    if (artworkFetchProcess.running) return
+    if (root.artworkQueue.length === 0) return
+    var job = root.artworkQueue.shift()
+    root.artworkState[job.url] = "inflight"
+    artworkFetchProcess.currentUrl = job.url
+    artworkFetchProcess.command = ["curl", "-fsS", "--create-dirs", "--max-time", "8", "-o", job.path, job.url]
+    artworkFetchProcess.running = true
+  }
+
   function launcherInstalled(id) {
     var launcher = launcherFor(id)
     return launcher ? launcher.installed === true : false
@@ -307,6 +360,22 @@ Panel {
   Process {
     id: favoritesSaveProcess
     command: ["python3", root.scanPath, "favorites-set", "{}"]
+  }
+
+  // Best-effort, non-blocking remote artwork fetch (Heroic art_square only).
+  // One download at a time via a queue; failures silently fall back to the
+  // launcher glyph and are not retried in this session. On exit the revision
+  // bump makes remote GameRows re-read their cache file.
+  Process {
+    id: artworkFetchProcess
+    property string currentUrl: ""
+    onExited: function(exitCode, exitStatus) {
+      var url = artworkFetchProcess.currentUrl
+      if (exitCode === 0) root.artworkState[url] = "ready"
+      else root.artworkState[url] = "failed"
+      root.artRevision++
+      root.pumpArtworkQueue()
+    }
   }
 
   Timer {
@@ -577,6 +646,21 @@ Panel {
     Component.onCompleted: root.registerFocusable(gameRow)
     Component.onDestruction: root.unregisterFocusable(gameRow)
 
+    // After a curl download lands, re-read the cached remote image. Only
+    // remote-only rows reload; local-artwork rows never need it. Re-assign
+    // unconditionally so the Image re-reads disk even when the path is the
+    // same as before the download completed. Connections is required because
+    // inline components do not resolve parent-scope signal handlers.
+    Connections {
+      target: root
+      function onArtRevisionChanged() {
+        var a = gameRow.game && gameRow.game.artwork
+        if (!a || a.localPath || !a.url) return
+        artImage.source = ""
+        artImage.source = root.artworkSource(gameRow.game)
+      }
+    }
+
     Row {
       id: rowInner
       anchors.left: parent.left
@@ -586,20 +670,48 @@ Panel {
       anchors.rightMargin: Style.space(6)
       spacing: Style.space(8)
 
-      Text {
-        text: root.launcherGlyph(gameRow.game ? gameRow.game.launcher : "")
-        color: gameRow.foreground
-        opacity: root.gameLaunchAvailable(gameRow.game) ? 1 : 0.45
-        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-        font.pixelSize: Style.font.title
-        width: Style.space(22)
-        horizontalAlignment: Text.AlignHCenter
+      // Compact artwork tile (replaces the launcher glyph). Local artwork is
+      // shown immediately; a cached remote download appears after curl
+      // finishes; otherwise the launcher glyph is the fallback. The Image is
+      // only visible once fully decoded, so an invalid/missing/failed source
+      // can never render Qt's broken-image placeholder.
+      Rectangle {
+        id: artTile
+        width: Style.space(30)
+        height: Style.space(30)
+        radius: Style.spacing.labelGap
+        color: Style.normalFillFor(gameRow.foreground, Color.accent)
         anchors.verticalCenter: parent.verticalCenter
+
+        Image {
+          id: artImage
+          anchors.fill: parent
+          anchors.margins: Style.space(2)
+          asynchronous: true
+          cache: false
+          smooth: true
+          fillMode: Image.PreserveAspectCrop
+          source: root.artworkSource(gameRow.game)
+          visible: status === Image.Ready
+          onStatusChanged: {
+            if (status === Image.Error && root.opened) root.ensureArtwork(gameRow.game)
+          }
+        }
+
+        Text {
+          anchors.centerIn: parent
+          visible: artImage.status !== Image.Ready
+          text: root.launcherGlyph(gameRow.game ? gameRow.game.launcher : "")
+          color: gameRow.foreground
+          opacity: root.gameLaunchAvailable(gameRow.game) ? 1 : 0.45
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.title
+        }
       }
 
       Column {
         anchors.verticalCenter: parent.verticalCenter
-        width: parent.width - Style.space(62)
+        width: parent.width - Style.space(70)
         spacing: Style.space(1)
 
         Text {
