@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a problem with GameDock
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Briefly describe the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Tell us exactly what you did before the issue occurred.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect GameDock to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots-logs
+    attributes:
+      label: Screenshots or logs
+      description: Add screenshots, terminal output, or relevant Quickshell/Omarchy logs if available.
+    validations:
+      required: false
+
+  - type: input
+    id: omarchy-version
+    attributes:
+      label: Omarchy version
+      description: The Omarchy version or commit/version information you are using.
+    validations:
+      required: true
+
+  - type: input
+    id: gamedock-version
+    attributes:
+      label: GameDock version
+      description: The installed GameDock version or commit hash.
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Anything else that might help reproduce the issue.
+    validations:
+      required: false
