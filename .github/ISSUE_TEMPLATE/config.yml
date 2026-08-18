@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: GameDock README
+    url: https://github.com/prathamesh913/gamedock#readme
+    about: Setup, usage, and plugin documentation.
+  - name: GitHub Discussions
+    url: https://github.com/prathamesh913/gamedock/discussions
+    about: Ask questions and share ideas with the community.
