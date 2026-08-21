@@ -562,6 +562,37 @@ def scan_heroic(doc, launcher):
 HISTORY_BASENAMES = {"content_history.lpl", "content_video_history.lpl"}
 
 
+def _retroarch_thumbnail(db_name, label, rom_path=None):
+    """Local box art from RetroArch's own thumbnail tree.
+
+    Art lives at thumbnails/<system>/Named_Boxarts/<label>.png, where <label>
+    has the characters &*/:`<>?\\| replaced by _. History playlists store an
+    empty label and db_name, so fall back to the ROM filename stem and search
+    every system directory.
+    """
+    stem = label or ""
+    if not stem and rom_path:
+        stem = os.path.splitext(os.path.basename(rom_path))[0]
+    if not stem:
+        return None
+    safe = re.sub(r'[&*/:`<>?\\|]', '_', stem)
+    root = os.path.join(HOME, ".config", "retroarch", "thumbnails")
+    systems = []
+    if db_name:
+        systems.append(db_name[:-4] if db_name.endswith(".lpl") else db_name)
+    try:
+        systems.extend(sorted(d for d in os.listdir(root) if d not in systems))
+    except OSError:
+        pass
+    for system in systems:
+        for kind in ("Named_Boxarts", "Named_Titles", "Named_Snaps"):
+            for name in (safe, stem):
+                candidate = os.path.join(root, system, kind, name + ".png")
+                if os.path.isfile(candidate) and valid_artwork_file(candidate):
+                    return candidate
+    return None
+
+
 def _clean_playlist_entry(item):
     path = str(item.get("path") or "")
     if not path:
@@ -654,7 +685,7 @@ def scan_retroarch(doc, launcher):
         lp = lrtl_map.get(stem)
         title = entry["label"] or os.path.splitext(os.path.basename(entry["path"]))[0]
         core_key = os.path.basename(core) if core else "unknown"
-        return {
+        game = {
             "id": "retro/{}/{}".format(core_key, entry["path"]),
             "title": title,
             "launcher": "retroarch",
@@ -663,6 +694,10 @@ def scan_retroarch(doc, launcher):
             "launch": {"core": core, "rom": entry["path"]},
             "_order": order_index,
         }
+        art = artwork_object(_retroarch_thumbnail(entry.get("db_name"), entry.get("label"), entry.get("path")))
+        if art:
+            game["artwork"] = art
+        return game
 
     games = []
     seen_game_ids = set()
@@ -693,6 +728,8 @@ def scan_retroarch(doc, launcher):
             "installed": True,
             "launch": g["launch"],
         }
+        if g.get("artwork"):
+            recent_entry["artwork"] = g["artwork"]
         doc["recent"].append(recent_entry)
 
 
