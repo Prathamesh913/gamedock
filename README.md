@@ -32,6 +32,8 @@ different built-in Omarchy themes:
 - ⌨️ Keyboard navigation
 - 🖱️ Mouse interaction
 - 🪟 Native Omarchy popout integration
+- ↻ Manual library rescan (button or `R`)
+- 🔔 Native Omarchy launch and refresh feedback
 - 📚 Large-library scrolling
 - 🚀 Direct launching through supported launchers
 
@@ -106,14 +108,27 @@ working and uses the launcher glyph fallback.
 |---|---|
 | Open or close GameDock | Click the GameDock bar icon |
 | Refresh launcher data | Middle- or right-click the bar icon |
+| Rescan the game library | Click `↻ Rescan Games` or press `R` outside the search field |
 | Activate search | Press `/` or click the search field |
 | Edit search | Type in the active search field |
 | Navigate games and controls | Arrow keys, `h`/`j`/`k`/`l`, or mouse |
 | Change launcher or sort | Click a chip, or focus it and press Enter/Space |
-| Launch a game | Click it, or focus it and press Enter/Space |
+| Launch a game | Click it, or focus it and press Enter/Space (panel closes) |
 | Toggle a favorite | Click the star, or focus it and press Enter/Space |
 | Clear search / close | Escape |
 | Switch bar panels | Tab / Shift+Tab |
+
+Launching a game or launcher shows a native Omarchy notification
+(`Launching <title>` / `Opening <name>`). Failures detectable at spawn
+time show an error toast instead (`Could not launch <title>`); failures
+after the game process starts are not visible to GameDock.
+
+A manual rescan reuses the normal scanner, shows a `Scanning…` state, and
+reports `Game library updated` on success or `Could not refresh game
+library` on failure while keeping the previous library. Search, launcher
+filter, sort mode, and focus are preserved where possible. Pressing `R`
+rescans only when the search field is not focused; typing `r` still
+refines a non-empty search.
 
 ## Artwork
 
@@ -152,7 +167,9 @@ Git repository.
 
 - Supported launchers are currently Steam, Heroic, RetroArch, and RPCS3.
 - Controller navigation is not available yet.
-- Launch failure feedback is limited.
+- Only launch failures detectable at spawn time can show an error toast.
+- There is no background monitoring or periodic rescanning beyond the
+  existing refresh-interval setting.
 - Current testing through 1000 synthetic games did not show a meaningful need
   for virtualized list rendering; very large real-world libraries may still
   benefit from it in the future.
@@ -163,7 +180,6 @@ Possible future work includes:
 
 - Controller navigation
 - Additional launcher integrations
-- More visible launch failure feedback
 - Automated tests and CI
 - Further polish based on real-world usage
 

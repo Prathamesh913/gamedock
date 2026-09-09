@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.prathamesh913.gamedock",
   "name": "GameDock",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Prathamesh",
   "license": "MIT",
   "description": "Gaming dashboard for the Omarchy bar: launch Steam, Heroic, RetroArch, and RPCS3 games straight from a compact panel.",

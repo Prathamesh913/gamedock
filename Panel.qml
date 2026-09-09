@@ -66,6 +66,15 @@ Panel {
 
   property string favoritesPendingPayload: ""
 
+  // Manual rescan state. rescanPending marks a user-triggered refresh so its
+  // completion can restore focus and report through the native notification
+  // path; timer-triggered refreshes reuse the same scanner silently.
+  // scanProcess.running itself is the scanning indicator and the guard that
+  // prevents overlapping scans.
+  property bool rescanPending: false
+  property bool rescanGotData: false
+  property string rescanFocusId: ""
+
   readonly property var launcherFilterOptions: {
     root.dataRevision
     var out = [{ value: "", label: "All" }]
@@ -221,12 +230,72 @@ Panel {
 
   function launchGame(game) {
     Model.setExecRunner(function(argv) { Quickshell.execDetached(argv) })
-    return Model.launchGame(game)
+    var title = Model.displayTitle(game)
+    var ok = Model.launchGame(game)
+    if (ok) {
+      root.notify("Launching " + title)
+      root.close()
+    } else {
+      root.notify("Could not launch " + title)
+    }
+    return ok
   }
 
   function launchLauncher(launcher) {
     Model.setExecRunner(function(argv) { Quickshell.execDetached(argv) })
-    return Model.launchLauncher(launcher)
+    var name = Model.displayLauncherName(launcher)
+    var ok = Model.launchLauncher(launcher)
+    if (ok) {
+      root.notify("Opening " + name)
+      root.close()
+    } else {
+      root.notify("Could not open " + name)
+    }
+    return ok
+  }
+
+  // Native Omarchy install location, with the documented default fallback.
+  readonly property string omarchyPath: {
+    var p = String(Quickshell.env("OMARCHY_PATH") || "")
+    return p !== "" ? p : "/usr/share/omarchy"
+  }
+
+  // Native Omarchy feedback through omarchy-notification-send — the same
+  // toast path first-party shell plugins use. Detached and non-blocking;
+  // called at most once per user action outcome, never on mere selection.
+  function notify(headline, description) {
+    Model.notify(String(headline || ""), String(description || ""))
+  }
+
+  // User-triggered library refresh reusing the existing scanner path: no
+  // second implementation, no polling, no daemon. Search, launcher filter,
+  // and sort mode persist untouched (only open() clears them); the focused
+  // game id is captured here and restored on completion.
+  function rescanGames() {
+    if (scanProcess.running || root.rescanPending) return
+    var item = root.focusIndex >= 0 && root.focusIndex < root.focusables.length
+      ? root.focusables[root.focusIndex] : null
+    root.rescanFocusId = item && item.game && item.game.id ? String(item.game.id) : ""
+    root.rescanGotData = false
+    root.rescanPending = true
+    root.refresh()
+  }
+
+  // Restore the pre-scan focus when that game still exists; otherwise fall
+  // back to the first meaningful row (first game, else first focusable).
+  function restoreRescanFocus() {
+    var id = root.rescanFocusId
+    root.rescanFocusId = ""
+    if (id !== "") {
+      for (var i = 0; i < root.focusables.length; i++) {
+        var item = root.focusables[i]
+        if (item && item.game && String(item.game.id) === id) {
+          root.focusAt(i)
+          return
+        }
+      }
+    }
+    root.focusInitial()
   }
 
   function registerFocusable(item) {
@@ -513,9 +582,15 @@ Panel {
   // Printable key from the key catcher (search field not focused). "/"
   // activates the search field; with a non-empty query other characters
   // refine it, matching the first-party menu/dropdown filter pattern.
+  // "R" always rescans; lowercase "r" rescans only when there is no query
+  // to refine, so query refinement keeps working.
   function handleTextKey(t) {
     if (t === "/") {
       root.focusSearch()
+      return
+    }
+    if (Model.rescanKeyPressed(t, root.searchQuery)) {
+      root.rescanGames()
       return
     }
     if (root.searchQuery !== "") root.searchQuery = root.searchQuery + t
@@ -560,6 +635,9 @@ Panel {
   Component.onCompleted: {
     Model.setRefreshRunner(function() { root.refresh() })
     Model.setExecRunner(function(argv) { Quickshell.execDetached(argv) })
+    Model.setNotifyRunner(function(parts) {
+      Quickshell.execDetached([root.omarchyPath + "/bin/omarchy-notification-send"].concat(parts))
+    })
   }
 
   FileView {
@@ -589,10 +667,29 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         var parsed = Model.parseScan(String(text || "").trim())
-        if (parsed) root.applyScan(parsed)
+        if (parsed) {
+          root.applyScan(parsed)
+          if (root.rescanPending) root.rescanGotData = true
+        }
         // A failed process produces no replacement cache, so the old cache
         // remains visible. A successful scan writes this atomically.
         cacheFile.reload()
+      }
+    }
+    // Manual-rescan outcome: success restores focus and toasts once; failure
+    // keeps the previous valid library and toasts an error instead. Either
+    // way the pending flag is cleared here so the UI can never stick in a
+    // scanning state. Timer-triggered scans skip this block silently.
+    onExited: {
+      if (!root.rescanPending) return
+      root.rescanPending = false
+      var updated = exitCode === 0 && root.rescanGotData
+      root.rescanGotData = false
+      if (updated) {
+        Qt.callLater(root.restoreRescanFocus)
+        root.notify("Game library updated")
+      } else {
+        root.notify("Could not refresh game library")
       }
     }
   }
@@ -897,6 +994,50 @@ Panel {
                   Component.onCompleted: root.registerFocusable(sortChip)
                   Component.onDestruction: root.unregisterFocusable(sortChip)
                 }
+              }
+            }
+          }
+
+          // Manual rescan — one compact action reusing the existing scanner
+          // path. While a scan runs the button shows a spinning scanning
+          // state; extra clicks and the R shortcut are ignored until it
+          // finishes. Search, filter, sort, and focus are preserved.
+          Item {
+            width: parent.width
+            implicitHeight: rescanRow.implicitHeight
+
+            Row {
+              id: rescanRow
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.leftMargin: Style.space(6)
+              anchors.rightMargin: Style.space(6)
+              spacing: Style.space(4)
+
+              Button {
+                id: rescanButton
+                iconText: "↻"
+                iconSpinning: scanProcess.running
+                text: scanProcess.running ? "Scanning…" : "Rescan Games"
+                tooltipText: "Re-run the game library scan (R)"
+                hasCursor: root.focusables[root.focusIndex] === rescanButton
+                bordered: true
+                foreground: root.bar ? root.bar.foreground : Color.foreground
+                accent: Color.accent
+                fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+                fontSize: Style.font.caption
+                horizontalPadding: Style.space(6)
+                verticalPadding: Style.space(2)
+                opacity: scanProcess.running ? 0.6 : 1
+                property int focusOrder: -500
+                onHovered: function(h) { if (h && !scanProcess.running) root.setHoverCursor(rescanButton) }
+                onClicked: {
+                  root.setHoverCursor(rescanButton)
+                  root.rescanGames()
+                }
+                function activate() { root.rescanGames() }
+                Component.onCompleted: root.registerFocusable(rescanButton)
+                Component.onDestruction: root.unregisterFocusable(rescanButton)
               }
             }
           }

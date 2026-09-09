@@ -1,12 +1,14 @@
 // GameDock Model — UI-facing data and launch logic.
 //
 // QML owns presentation and file/process objects. This module owns the
-// canonical game-facing operations and receives two small runners from the
-// panel: one for refreshes and one for detached argv execution.
+// canonical game-facing operations and receives three small runners from the
+// panel: one for refreshes, one for detached argv execution, and one for
+// native Omarchy notifications.
 
 var favorites = []
 var refreshRunner = null
 var execRunner = null
+var notifyRunner = null
 var launchersById = ({})
 
 function setRefreshRunner(fn) {
@@ -15,6 +17,10 @@ function setRefreshRunner(fn) {
 
 function setExecRunner(fn) {
   execRunner = fn
+}
+
+function setNotifyRunner(fn) {
+  notifyRunner = fn
 }
 
 function refresh() {
@@ -52,6 +58,19 @@ function run(argv) {
     return false
   }
   execRunner(argv)
+  return true
+}
+
+// Native Omarchy feedback. The panel wires this to omarchy-notification-send;
+// detached and non-blocking by construction. Returns true when a notification
+// was handed off, false when no runner is wired (callers must not treat that
+// as a launch failure).
+function notify(headline, description) {
+  var title = String(headline || "").trim()
+  if (title === "" || typeof notifyRunner !== "function") return false
+  var body = String(description || "").trim()
+  if (body !== "") notifyRunner([title, body])
+  else notifyRunner([title])
   return true
 }
 
@@ -104,6 +123,25 @@ function launchLauncher(launcher) {
     return false
   }
   return run([String(launcher.executable)])
+}
+
+// Display titles for feedback toasts. Internal ids and executable paths are
+// never shown to the user.
+function displayTitle(game) {
+  return game && game.title ? String(game.title) : "game"
+}
+
+function displayLauncherName(launcher) {
+  return launcher && launcher.name ? String(launcher.name) : "launcher"
+}
+
+// Manual-rescan shortcut rule for the panel key catcher (search field not
+// focused): "R" always rescans; lowercase "r" rescans only when there is no
+// query to refine, preserving the first-party type-to-refine pattern.
+function rescanKeyPressed(text, searchQuery) {
+  if (text === "R") return true
+  if (text === "r" && String(searchQuery || "") === "") return true
+  return false
 }
 
 // Favorites are stored as {"favorites": [stable-game-id, ...]}.
