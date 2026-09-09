@@ -562,6 +562,49 @@ def scan_heroic(doc, launcher):
 HISTORY_BASENAMES = {"content_history.lpl", "content_video_history.lpl"}
 
 
+_RA_SYSTEMS_CACHE = {}
+
+
+def _retroarch_systems(root):
+    """Directory names under the thumbnails root, read once per run."""
+    if root not in _RA_SYSTEMS_CACHE:
+        try:
+            _RA_SYSTEMS_CACHE[root] = sorted(os.listdir(root))
+        except OSError:
+            _RA_SYSTEMS_CACHE[root] = []
+    return _RA_SYSTEMS_CACHE[root]
+
+
+def _retroarch_thumbnail(db_name, label, rom_path=None):
+    """Local box art from RetroArch's own thumbnail tree.
+
+    Art lives at thumbnails/<system>/Named_Boxarts/<label>.png, where <label>
+    has the characters &*/:"`<>?\\| replaced by _. When db_name names the
+    system only that directory is probed; history playlists store an empty label
+    and db_name, so fall back to the ROM filename stem and search every system
+    directory (the listing is cached across games).
+    """
+    stem = label or ""
+    if not stem and rom_path:
+        stem = os.path.splitext(os.path.basename(rom_path))[0]
+    if not stem:
+        return None
+    safe = re.sub(r'[&*/:"`<>?\\|]', '_', stem)
+    names = [safe] if safe == stem else [safe, stem]
+    root = os.path.join(HOME, ".config", "retroarch", "thumbnails")
+    if db_name:
+        systems = [db_name[:-4] if db_name.endswith(".lpl") else db_name]
+    else:
+        systems = _retroarch_systems(root)
+    for system in systems:
+        for kind in ("Named_Boxarts", "Named_Titles", "Named_Snaps"):
+            for name in names:
+                candidate = os.path.join(root, system, kind, name + ".png")
+                if os.path.isfile(candidate) and valid_artwork_file(candidate):
+                    return candidate
+    return None
+
+
 def _clean_playlist_entry(item):
     path = str(item.get("path") or "")
     if not path:
@@ -654,7 +697,7 @@ def scan_retroarch(doc, launcher):
         lp = lrtl_map.get(stem)
         title = entry["label"] or os.path.splitext(os.path.basename(entry["path"]))[0]
         core_key = os.path.basename(core) if core else "unknown"
-        return {
+        game = {
             "id": "retro/{}/{}".format(core_key, entry["path"]),
             "title": title,
             "launcher": "retroarch",
@@ -663,6 +706,10 @@ def scan_retroarch(doc, launcher):
             "launch": {"core": core, "rom": entry["path"]},
             "_order": order_index,
         }
+        art = artwork_object(_retroarch_thumbnail(entry.get("db_name"), entry.get("label"), entry.get("path")))
+        if art:
+            game["artwork"] = art
+        return game
 
     games = []
     seen_game_ids = set()
@@ -672,19 +719,21 @@ def scan_retroarch(doc, launcher):
             continue
         seen_game_ids.add(g["id"])
         games.append(g)
-    # history entries also count as installed games, deduped by id
+    # history entries also count as installed games, deduped by id. Build each
+    # game dict once and keep it in history order so the recent list can reuse
+    # it (artwork included) instead of re-running to_game per entry.
+    history_built = []
     for idx, entry in enumerate(history_items):
         g = to_game(entry, idx)
+        history_built.append(g)
         if g["id"] in seen_game_ids:
             continue
         seen_game_ids.add(g["id"])
         games.append(g)
     doc["games"].extend(games)
 
-    # recent: history order, newest first (history appends newest last)
-    history_items.reverse()
-    for idx, entry in enumerate(history_items):
-        g = to_game(entry, idx)
+    # recent: newest first (history appends newest last)
+    for g in reversed(history_built):
         recent_entry = {
             "id": g["id"],
             "title": g["title"],
@@ -693,6 +742,8 @@ def scan_retroarch(doc, launcher):
             "installed": True,
             "launch": g["launch"],
         }
+        if g.get("artwork"):
+            recent_entry["artwork"] = g["artwork"]
         doc["recent"].append(recent_entry)
 
 
